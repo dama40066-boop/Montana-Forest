@@ -12,7 +12,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: github-pages
+  group: pages
   cancel-in-progress: true
 
 jobs:
@@ -27,17 +27,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
 
       - name: Install dependencies
         run: npm install
 
-      - name: Build Vite
-        run: npm run build -- --base=/Montana-Forest/
+      - name: Build project
+        run: npm run build
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload artifact
+      - name: Upload dist
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./dist
