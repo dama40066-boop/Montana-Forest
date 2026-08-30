@@ -1,0 +1,6 @@
+{
+  "name": "Vanishing Pines",
+  "description": "Open-world mystery and survival simulation game powered by a custom physics and AI engine with emergent NPC behavior, hunting, crime, and dynamic economy.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
