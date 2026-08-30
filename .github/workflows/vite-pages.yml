@@ -1,4 +1,4 @@
-name: Deploy Vite to GitHub Pages
+name: Build and Deploy Montana Forest
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: github-pages
   cancel-in-progress: true
 
 jobs:
@@ -27,13 +27,22 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
 
       - name: Install dependencies
         run: npm install
 
-      - name: Build project
-        run: npm run build
+      - name: Build Vite application
+        run: npx vite build --base=/Montana-Forest/
+
+      - name: Build server bundle
+        run: >
+          npx esbuild server.ts
+          --bundle
+          --platform=node
+          --format=cjs
+          --packages=external
+          --sourcemap
+          --outfile=dist/server.cjs
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
