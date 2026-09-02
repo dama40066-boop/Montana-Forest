@@ -24,14 +24,32 @@ export interface HumanoidRig {
   walkPhase: number;
   baseTorsoY: number;
   blinkTimer: number;
+  flinchTimer: number;
+  deathTimer: number;
+  deathWeight: number;
+  gazeYaw: number;
+  gazePitch: number;
+  idleTime: number;
+  strideBlend: number;
 }
 
-export interface AnimalMeshEntry {
+export interface AnimalRig {
   root: BABYLON.TransformNode;
+  species: string;
   body: BABYLON.Mesh;
+  headNode: BABYLON.TransformNode;
   head: BABYLON.Mesh;
-  legs: BABYLON.Mesh[];
+  antlers?: BABYLON.Mesh;
+  legFL: BABYLON.TransformNode;
+  legFR: BABYLON.TransformNode;
+  legBL: BABYLON.TransformNode;
+  legBR: BABYLON.TransformNode;
+  tail?: BABYLON.TransformNode;
   walkPhase: number;
+  baseY: number;
+  hopStage?: number;
+  hopTime?: number;
+  grazingWeight?: number;
 }
 
 export class BabylonRenderBackend {
@@ -43,6 +61,19 @@ export class BabylonRenderBackend {
   public shadowGenerator: BABYLON.ShadowGenerator | null = null;
   public waterMesh: BABYLON.Mesh | null = null;
 
+  // Realtime FPS Counter & Adaptive Dynamic Resolution Scaling
+  public currentFps: number = 60;
+  private frameTimes: number[] = [];
+  private lastFrameTimestamp: number = performance.now();
+  private adaptiveScalingTimer: number = 0;
+
+  // Physics-based Weapon Inertia Sway & Dynamic Camera Bobbing
+  public swayOffsetX: number = 0;
+  public swayOffsetY: number = 0;
+  public swayRotX: number = 0;
+  public swayRotY: number = 0;
+  public headBobCycle: number = 0;
+
   // Asset Loader System for PBR Normal (Bump) & ORM Texture Maps
   public assetLoader: PBRAssetLoader | null = null;
 
@@ -52,7 +83,7 @@ export class BabylonRenderBackend {
   // Visual Entity Registries
   public npcRigs: Map<number, HumanoidRig> = new Map();
   public playerRig: HumanoidRig | null = null;
-  public animalMeshes: Map<number, AnimalMeshEntry> = new Map();
+  public animalRigs: Map<number, AnimalRig> = new Map();
   public arrowMeshes: BABYLON.Mesh[] = [];
 
   // Weapon Viewmodel & FX Systems
@@ -66,10 +97,10 @@ export class BabylonRenderBackend {
 
   // Dynamic Point Lights with Flame Flicker Simulation
   public lanternLights: { light: BABYLON.PointLight; baseIntensity: number; flickerSeed: number }[] = [];
-  public windowMaterials: BABYLON.PBRMaterial[] = [];
+  public windowMaterials: (BABYLON.StandardMaterial | BABYLON.PBRMaterial)[] = [];
 
   // Materials
-  private materials: Record<string, BABYLON.PBRMaterial> = {};
+  private materials: Record<string, BABYLON.StandardMaterial | BABYLON.PBRMaterial | any> = {};
   private textureSets: Record<string, PBRTextureSet> = {};
 
   async initialize(canvas: HTMLCanvasElement): Promise<void> {
@@ -89,8 +120,12 @@ export class BabylonRenderBackend {
     this.engine = new BABYLON.Engine(canvas, true, {
       preserveDrawingBuffer: false,
       stencil: true,
-      adaptToDeviceRatio: this.quality !== 'LOW'
+      adaptToDeviceRatio: true
     });
+
+    const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
+    const targetScaling = this.quality === 'LOW' ? 1.5 : this.quality === 'MEDIUM' ? 1.0 : 1.0 / Math.min(dpr, 2.0);
+    this.engine.setHardwareScalingLevel(targetScaling);
 
     this.scene = new BABYLON.Scene(this.engine);
     this.scene.clearColor = new BABYLON.Color4(0.08, 0.12, 0.1, 1.0);
@@ -110,9 +145,25 @@ export class BabylonRenderBackend {
     this.initLighting();
     this.initWeaponViewModels();
 
-    window.addEventListener('resize', () => {
+    const onResize = () => {
       this.engine?.resize();
-    });
+    };
+    window.addEventListener('resize', onResize, { passive: true });
+    window.addEventListener('orientationchange', () => {
+      setTimeout(onResize, 100);
+      setTimeout(onResize, 300);
+    }, { passive: true });
+
+    if (typeof ResizeObserver !== 'undefined' && canvas.parentElement) {
+      const ro = new ResizeObserver(() => {
+        onResize();
+      });
+      ro.observe(canvas.parentElement);
+    }
+  }
+
+  public resize(): void {
+    this.engine?.resize();
   }
 
   private initWeaponViewModels(): void {
@@ -270,10 +321,18 @@ export class BabylonRenderBackend {
 
   public setQuality(level: QualityLevel): void {
     this.quality = level;
+    if (this.engine) {
+      const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
+      const targetScaling = level === 'LOW' ? 1.5 : level === 'MEDIUM' ? 1.0 : 1.0 / Math.min(dpr, 2.0);
+      this.engine.setHardwareScalingLevel(targetScaling);
+      this.engine.resize();
+    }
     if (this.assetLoader) {
       this.assetLoader.setQuality(level);
     }
     if (!this.scene || !this.camera) return;
+
+    this.scene.fogDensity = level === 'LOW' ? 0.005 : 0.0035;
 
     if (level === 'LOW') {
       this.scene.shadowsEnabled = false;
@@ -296,39 +355,39 @@ export class BabylonRenderBackend {
   private async initMaterials(): Promise<void> {
     if (!this.scene || !this.assetLoader) return;
 
-    // 1. Load All Environment PBR Texture Maps (Normal Maps, ORM Packed Maps, Albedo) via Asset Loader
+    // 1. Load All Environment Texture Maps (Normal Maps, Diffuse/Albedo) via Asset Loader
     const envMaterials = await this.assetLoader.loadAllEnvironmentMaterials();
     this.materials = { ...envMaterials };
 
-    // 2. Fallback/standard PBR helper for actors, wildlife & props
-    const createBasicPBR = (name: string, color: [number, number, number], roughness: number, metallic: number = 0, alpha: number = 1) => {
-      const mat = new BABYLON.PBRMaterial(name, this.scene!);
-      mat.albedoColor = new BABYLON.Color3(...color);
-      mat.roughness = roughness;
-      mat.metallic = metallic;
+    // 2. Reliable StandardMaterial helper for actors, wildlife & props
+    const createBasicMat = (name: string, color: [number, number, number], specular: number = 0.2, alpha: number = 1) => {
+      const mat = new BABYLON.StandardMaterial(name, this.scene!);
+      mat.diffuseColor = new BABYLON.Color3(...color);
+      mat.specularColor = new BABYLON.Color3(specular, specular, specular);
+      mat.specularPower = 32;
       mat.alpha = alpha;
       this.materials[name] = mat;
       return mat;
     };
 
-    createBasicPBR('skin', [0.65, 0.42, 0.32], 0.5);
-    createBasicPBR('cloth_player', [0.15, 0.2, 0.24], 0.75);
-    createBasicPBR('cloth_sheriff', [0.22, 0.25, 0.18], 0.7);
-    createBasicPBR('cloth_hunter', [0.32, 0.26, 0.15], 0.8);
-    createBasicPBR('cloth_outlaw', [0.25, 0.12, 0.12], 0.85);
-    createBasicPBR('cloth_civilian', [0.35, 0.3, 0.25], 0.8);
+    createBasicMat('skin', [0.65, 0.42, 0.32], 0.1);
+    createBasicMat('cloth_player', [0.15, 0.2, 0.24], 0.05);
+    createBasicMat('cloth_sheriff', [0.22, 0.25, 0.18], 0.05);
+    createBasicMat('cloth_hunter', [0.32, 0.26, 0.15], 0.05);
+    createBasicMat('cloth_outlaw', [0.25, 0.12, 0.12], 0.05);
+    createBasicMat('cloth_civilian', [0.35, 0.3, 0.25], 0.05);
 
     // High-fidelity Alpine Water Material
-    const waterMat = createBasicPBR('water', [0.06, 0.26, 0.32], 0.05, 0.12, 0.88);
-    waterMat.subSurface.isRefractionEnabled = true;
-    waterMat.subSurface.indexOfRefraction = 1.333;
-    waterMat.directIntensity = 1.4;
-    waterMat.specularIntensity = 1.8;
+    const waterMat = createBasicMat('water', [0.08, 0.32, 0.42], 0.85, 0.85);
+    waterMat.specularPower = 64;
 
-    createBasicPBR('deer_pelt', [0.45, 0.28, 0.14], 0.85);
-    createBasicPBR('wolf_pelt', [0.35, 0.35, 0.36], 0.9);
-    createBasicPBR('bear_pelt', [0.18, 0.12, 0.08], 0.95);
-    createBasicPBR('arrow_wood', [0.55, 0.45, 0.3], 0.6);
+    createBasicMat('deer_pelt', [0.45, 0.28, 0.14], 0.1);
+    createBasicMat('wolf_pelt', [0.35, 0.35, 0.36], 0.1);
+    createBasicMat('bear_pelt', [0.18, 0.12, 0.08], 0.05);
+    createBasicMat('boar_pelt', [0.26, 0.22, 0.18], 0.05);
+    createBasicMat('rabbit_pelt', [0.72, 0.68, 0.62], 0.1);
+    createBasicMat('antler_ivory', [0.82, 0.78, 0.68], 0.3);
+    createBasicMat('arrow_wood', [0.55, 0.45, 0.3], 0.2);
   }
 
   private initLighting(): void {
@@ -354,9 +413,9 @@ export class BabylonRenderBackend {
   buildWorldMesh(world: WorldGenerator, trees: TreeData[]): void {
     if (!this.scene) return;
 
-    // 1. Terrain Grid (190x190 units, 80 subdivisions)
-    const size = 190;
-    const subdivisions = this.quality === 'LOW' ? 50 : 80;
+    // 1. Vast Terrain Grid (360x360 units, seamless LOD subdivisions)
+    const size = 360;
+    const subdivisions = this.quality === 'LOW' ? 64 : this.quality === 'MEDIUM' ? 90 : 120;
     const terrain = BABYLON.MeshBuilder.CreateGround('TerrainMesh', {
       width: size,
       height: size,
@@ -381,8 +440,8 @@ export class BabylonRenderBackend {
 
     // 2. Mud Road Ribbon Mesh (Traversing Village center with glossy wet puddle PBR material)
     const roadPoints: BABYLON.Vector3[] = [];
-    for (let rx = -20; rx <= 55; rx += 2.5) {
-      const rz = Math.sin(rx * 0.03) * 6 + 16;
+    for (let rx = -20; rx <= 65; rx += 2.5) {
+      const rz = 20 + Math.sin(rx * 0.04) * 2.5;
       const ry = world.height(rx, rz) + 0.04;
       roadPoints.push(new BABYLON.Vector3(rx, ry, rz));
     }
@@ -394,7 +453,7 @@ export class BabylonRenderBackend {
       const nextP = roadPoints[Math.min(roadPoints.length - 1, i + 1)];
       const dir = nextP.subtract(p).normalize();
       const norm = new BABYLON.Vector3(-dir.z, 0, dir.x).normalize();
-      const halfWidth = 2.4;
+      const halfWidth = 2.8;
 
       const pLeft = p.add(norm.scale(halfWidth));
       const pRight = p.subtract(norm.scale(halfWidth));
@@ -412,61 +471,29 @@ export class BabylonRenderBackend {
     roadMesh.material = this.materials.mud_soil;
     roadMesh.receiveShadows = true;
 
-    // 3. Lake Shoreline Mud/Sand Bank Ring
-    const shorelinePoints: BABYLON.Vector3[][] = [[], []];
-    const steps = 48;
-    for (let i = 0; i <= steps; i++) {
-      const theta = (i / steps) * Math.PI * 2;
-      const u = Math.cos(theta) * 64;
-      const v = Math.sin(theta) * 31;
-      // Rotate 45 deg
-      const x = 15 + (u * 0.7071 - v * 0.7071);
-      const z = -35 + (u * 0.7071 + v * 0.7071);
-      const y = world.height(x, z) + 0.03;
-
-      const uOut = Math.cos(theta) * 68;
-      const vOut = Math.sin(theta) * 35;
-      const xOut = 15 + (uOut * 0.7071 - vOut * 0.7071);
-      const zOut = -35 + (uOut * 0.7071 + vOut * 0.7071);
-      const yOut = world.height(xOut, zOut) + 0.03;
-
-      shorelinePoints[0].push(new BABYLON.Vector3(x, y, z));
-      shorelinePoints[1].push(new BABYLON.Vector3(xOut, yOut, zOut));
-    }
-
-    const shorelineMesh = BABYLON.MeshBuilder.CreateRibbon('ShorelineMud', {
-      pathArray: shorelinePoints,
-      sideOrientation: BABYLON.Mesh.DOUBLESIDE
+    // 3. Expansive Flathead Lake Water Mesh (380x380 plane at y=0.72)
+    this.waterMesh = BABYLON.MeshBuilder.CreateGround('LakeWater', {
+      width: 380,
+      height: 380,
+      subdivisions: this.quality === 'LOW' ? 24 : 48
     }, this.scene);
-    shorelineMesh.material = this.materials.mud_soil;
-    shorelineMesh.receiveShadows = true;
-
-    // 4. Lake Water Mesh (Flathead Lake Elongated Ellipse Basin at 15, -35)
-    this.waterMesh = BABYLON.MeshBuilder.CreateDisc('LakeWater', {
-      radius: 65,
-      tessellation: this.quality === 'LOW' ? 32 : 64
-    }, this.scene);
-    this.waterMesh.position.set(15, 0.72, -35);
-    this.waterMesh.rotation.x = Math.PI / 2;
-    this.waterMesh.rotation.z = Math.PI / 4; // 45 deg tilt for NW to SE elongation
-    this.waterMesh.scaling.x = 1.15;
-    this.waterMesh.scaling.y = 0.62;
+    this.waterMesh.position.set(15, 0.72, -45);
     this.waterMesh.material = this.materials.water;
 
-    // 5. High-Fidelity 3-Tier Pine Trees with Bark PBR & Layered Canopies
-    const trunkBase = BABYLON.MeshBuilder.CreateCylinder('TrunkBase', { height: 4.2, diameterBottom: 0.42, diameterTop: 0.28 }, this.scene);
+    // 4. High-Fidelity 3-Tier Pine Trees with Deep Trunk Grounding (Guaranteed zero floating)
+    const trunkBase = BABYLON.MeshBuilder.CreateCylinder('TrunkBase', { height: 5.6, diameterBottom: 0.46, diameterTop: 0.26 }, this.scene);
     trunkBase.material = this.materials.bark_pine;
     trunkBase.isVisible = false;
 
-    const crownTier1 = BABYLON.MeshBuilder.CreateCylinder('CrownTier1', { height: 2.2, diameterTop: 0.4, diameterBottom: 3.2, tessellation: 7 }, this.scene);
+    const crownTier1 = BABYLON.MeshBuilder.CreateCylinder('CrownTier1', { height: 2.4, diameterTop: 0.4, diameterBottom: 3.4, tessellation: 7 }, this.scene);
     crownTier1.material = this.materials.needle_pine;
     crownTier1.isVisible = false;
 
-    const crownTier2 = BABYLON.MeshBuilder.CreateCylinder('CrownTier2', { height: 2.0, diameterTop: 0.2, diameterBottom: 2.4, tessellation: 7 }, this.scene);
+    const crownTier2 = BABYLON.MeshBuilder.CreateCylinder('CrownTier2', { height: 2.1, diameterTop: 0.2, diameterBottom: 2.6, tessellation: 7 }, this.scene);
     crownTier2.material = this.materials.needle_pine;
     crownTier2.isVisible = false;
 
-    const crownTier3 = BABYLON.MeshBuilder.CreateCylinder('CrownTier3', { height: 1.8, diameterTop: 0.04, diameterBottom: 1.6, tessellation: 7 }, this.scene);
+    const crownTier3 = BABYLON.MeshBuilder.CreateCylinder('CrownTier3', { height: 1.9, diameterTop: 0.04, diameterBottom: 1.7, tessellation: 7 }, this.scene);
     crownTier3.material = this.materials.needle_pine;
     crownTier3.isVisible = false;
 
@@ -474,29 +501,29 @@ export class BabylonRenderBackend {
       const t = trees[i];
       const s = t.scale;
 
+      // Trunk sunk 0.85m deep into terrain so it NEVER floats on any incline
       const trunk = trunkBase.createInstance(`trunk_${i}`);
-      trunk.position.set(t.x, t.y + (4.2 * s) / 2, t.z);
+      trunk.position.set(t.x, t.y + (5.6 * s) / 2 - 0.85 * s, t.z);
       trunk.scaling.set(s, s, s);
 
       const c1 = crownTier1.createInstance(`crown1_${i}`);
-      c1.position.set(t.x, t.y + 2.4 * s, t.z);
+      c1.position.set(t.x, t.y + 2.0 * s, t.z);
       c1.scaling.set(s, s, s);
 
       const c2 = crownTier2.createInstance(`crown2_${i}`);
-      c2.position.set(t.x, t.y + 3.6 * s, t.z);
+      c2.position.set(t.x, t.y + 3.3 * s, t.z);
       c2.scaling.set(s * 0.95, s * 0.95, s * 0.95);
 
       const c3 = crownTier3.createInstance(`crown3_${i}`);
-      c3.position.set(t.x, t.y + 4.8 * s, t.z);
+      c3.position.set(t.x, t.y + 4.5 * s, t.z);
       c3.scaling.set(s * 0.9, s * 0.9, s * 0.9);
 
-      if (this.shadowGenerator && i % 3 === 0 && this.quality !== 'LOW') {
+      if (this.shadowGenerator && i % 4 === 0 && this.quality !== 'LOW') {
         this.shadowGenerator.addShadowCaster(c1);
-        this.shadowGenerator.addShadowCaster(c2);
       }
     }
 
-    // 6. Natural Stone Boulders & Rock Outcroppings (Showcasing Stone PBR specular & normal relief)
+    // 5. Natural Stone Boulders & Rock Outcroppings
     const rockLocations = [
       { x: 32, z: 2, scale: 2.4, rotY: 0.4 },
       { x: 42, z: 28, scale: 3.2, rotY: 1.2 },
@@ -516,7 +543,7 @@ export class BabylonRenderBackend {
 
     for (let i = 0; i < rockLocations.length; i++) {
       const r = rockLocations[i];
-      const ry = world.height(r.x, r.z) + r.scale * 0.4;
+      const ry = world.height(r.x, r.z) + r.scale * 0.3;
       const rock = boulderBase.createInstance(`rock_boulder_${i}`);
       rock.position.set(r.x, ry, r.z);
       rock.scaling.set(r.scale * 1.2, r.scale * 0.85, r.scale);
@@ -528,7 +555,7 @@ export class BabylonRenderBackend {
       }
     }
 
-    // 7. Village Buildings with Porches, Glowing Glass Windows, Doors & Lanterns
+    // 6. Village Buildings with Solid Plinth Skirting, Porches, Windows & Lanterns
     this.lanternLights = [];
     this.windowMaterials = [];
 
@@ -546,12 +573,12 @@ export class BabylonRenderBackend {
 
         // Timber pilings supporting dock in lake bed
         for (let pz = -b.d / 2 + 1.5; pz <= b.d / 2 - 1.5; pz += 3.5) {
-          const postL = BABYLON.MeshBuilder.CreateCylinder(`dock_post_${pz}_L`, { height: 2.2, diameter: 0.28 }, this.scene);
+          const postL = BABYLON.MeshBuilder.CreateCylinder(`dock_post_${pz}_L`, { height: 3.2, diameter: 0.28 }, this.scene);
           postL.parent = root;
           postL.position.set(-b.w / 2 + 0.3, 0.0, pz);
           postL.material = this.materials.dock_wood;
 
-          const postR = BABYLON.MeshBuilder.CreateCylinder(`dock_post_${pz}_R`, { height: 2.2, diameter: 0.28 }, this.scene);
+          const postR = BABYLON.MeshBuilder.CreateCylinder(`dock_post_${pz}_R`, { height: 3.2, diameter: 0.28 }, this.scene);
           postR.parent = root;
           postR.position.set(b.w / 2 - 0.3, 0.0, pz);
           postR.material = this.materials.dock_wood;
@@ -574,15 +601,16 @@ export class BabylonRenderBackend {
         continue;
       }
 
-      // Stone Foundation Plinth beneath buildings
-      const foundationH = 0.6;
+      // Deep Stone Foundation Skirting (Extends 0.8m underground so buildings never hang in the air)
+      const foundationH = 0.8;
+      const foundationTotalH = 1.6;
       const foundation = BABYLON.MeshBuilder.CreateBox(`${b.name}_foundation`, {
         width: b.w + 0.3,
-        height: foundationH,
+        height: foundationTotalH,
         depth: b.d + 0.3
       }, this.scene);
       foundation.parent = root;
-      foundation.position.y = foundationH / 2;
+      foundation.position.y = foundationTotalH / 2 - 0.8;
       foundation.material = this.materials.stone_rock;
 
       // Building Walls (Stone for Hideout, Timber Wood for village buildings)
@@ -987,15 +1015,24 @@ export class BabylonRenderBackend {
       rightEye,
       walkPhase: 0,
       baseTorsoY: 1.25,
-      blinkTimer: Math.random() * 4 + 2
+      blinkTimer: Math.random() * 4 + 2,
+      flinchTimer: 0,
+      deathTimer: 0,
+      deathWeight: 0,
+      gazeYaw: 0,
+      gazePitch: 0,
+      idleTime: Math.random() * 10,
+      strideBlend: 0
     };
 
     if (isPlayer) {
       this.playerRig = rig;
-      // In first person, hide head & eyes to prevent camera clipping
+      // In first person, disable player body meshes so they never obscure the camera
+      root.setEnabled(false);
       head.isVisible = false;
       leftEye.isVisible = false;
       rightEye.isVisible = false;
+      torso.isVisible = false;
     } else {
       this.npcRigs.set(id, rig);
     }
@@ -1005,6 +1042,294 @@ export class BabylonRenderBackend {
     }
 
     return rig;
+  }
+
+  createAnimalRig(id: number, species: string, name: string): AnimalRig {
+    if (!this.scene) throw new Error('Scene not initialized');
+
+    const root = new BABYLON.TransformNode(`animal_${species}_${id}`, this.scene);
+    let bodyMat = this.materials.deer_pelt;
+    let bodyW = 0.65, bodyH = 0.75, bodyD = 1.45;
+    let baseY = 1.05;
+
+    if (species === 'WOLF') {
+      bodyMat = this.materials.wolf_pelt;
+      bodyW = 0.45; bodyH = 0.55; bodyD = 1.15;
+      baseY = 0.75;
+    } else if (species === 'BEAR') {
+      bodyMat = this.materials.bear_pelt;
+      bodyW = 1.05; bodyH = 1.15; bodyD = 1.95;
+      baseY = 1.1;
+    } else if (species === 'BOAR') {
+      bodyMat = this.materials.boar_pelt;
+      bodyW = 0.65; bodyH = 0.65; bodyD = 1.25;
+      baseY = 0.68;
+    } else if (species === 'RABBIT') {
+      bodyMat = this.materials.rabbit_pelt;
+      bodyW = 0.28; bodyH = 0.28; bodyD = 0.42;
+      baseY = 0.3;
+    }
+
+    // Main Torso Mesh
+    const body = BABYLON.MeshBuilder.CreateBox(`body_${id}`, { width: bodyW, height: bodyH, depth: bodyD }, this.scene);
+    body.parent = root;
+    body.position.y = baseY;
+    body.material = bodyMat;
+
+    // Head Neck Node
+    const headNode = new BABYLON.TransformNode(`headNode_${id}`, this.scene);
+    headNode.parent = root;
+
+    let head: BABYLON.Mesh;
+    let antlers: BABYLON.Mesh | undefined;
+
+    if (species === 'DEER') {
+      headNode.position.set(0, baseY + 0.35, bodyD * 0.45);
+
+      // Long graceful neck
+      const neck = BABYLON.MeshBuilder.CreateCylinder(`neck_${id}`, { height: 0.7, diameter: 0.26 }, this.scene);
+      neck.parent = headNode;
+      neck.position.set(0, 0.3, 0.15);
+      neck.rotation.x = 0.4;
+      neck.material = bodyMat;
+
+      // Deer Head & Snout
+      head = BABYLON.MeshBuilder.CreateBox(`head_${id}`, { width: 0.28, height: 0.32, depth: 0.48 }, this.scene);
+      head.parent = headNode;
+      head.position.set(0, 0.62, 0.32);
+      head.material = bodyMat;
+
+      // Branching Antlers for Stags
+      antlers = BABYLON.MeshBuilder.CreateBox(`antlers_${id}`, { width: 0.95, height: 0.48, depth: 0.18 }, this.scene);
+      antlers.parent = head;
+      antlers.position.set(0, 0.26, -0.05);
+      antlers.material = this.materials.antler_ivory || bodyMat;
+    } else if (species === 'WOLF') {
+      headNode.position.set(0, baseY + 0.15, bodyD * 0.45);
+
+      head = BABYLON.MeshBuilder.CreateBox(`head_${id}`, { width: 0.32, height: 0.34, depth: 0.52 }, this.scene);
+      head.parent = headNode;
+      head.position.set(0, 0.1, 0.2);
+      head.material = bodyMat;
+
+      // Wolf Pointed Ears
+      const earL = BABYLON.MeshBuilder.CreateCylinder(`earL_${id}`, { height: 0.22, diameterTop: 0.02, diameterBottom: 0.1 }, this.scene);
+      earL.parent = head;
+      earL.position.set(-0.12, 0.22, -0.08);
+      earL.material = bodyMat;
+
+      const earR = earL.clone(`earR_${id}`);
+      earR.parent = head;
+      earR.position.x = 0.12;
+    } else if (species === 'BEAR') {
+      headNode.position.set(0, baseY + 0.15, bodyD * 0.45);
+
+      // Heavy shoulder hump
+      const hump = BABYLON.MeshBuilder.CreateSphere(`hump_${id}`, { diameter: 0.95 }, this.scene);
+      hump.parent = body;
+      hump.position.set(0, 0.4, 0.25);
+      hump.scaling.set(1.0, 0.8, 1.2);
+      hump.material = bodyMat;
+
+      head = BABYLON.MeshBuilder.CreateBox(`head_${id}`, { width: 0.58, height: 0.52, depth: 0.65 }, this.scene);
+      head.parent = headNode;
+      head.position.set(0, 0.05, 0.28);
+      head.material = bodyMat;
+    } else if (species === 'BOAR') {
+      headNode.position.set(0, baseY + 0.05, bodyD * 0.45);
+
+      head = BABYLON.MeshBuilder.CreateBox(`head_${id}`, { width: 0.42, height: 0.44, depth: 0.55 }, this.scene);
+      head.parent = headNode;
+      head.position.set(0, 0.0, 0.25);
+      head.material = bodyMat;
+
+      // Ivory Tusks
+      const tuskL = BABYLON.MeshBuilder.CreateCylinder(`tuskL_${id}`, { height: 0.18, diameterTop: 0.02, diameterBottom: 0.06 }, this.scene);
+      tuskL.parent = head;
+      tuskL.position.set(-0.16, -0.1, 0.22);
+      tuskL.rotation.x = -0.6;
+      tuskL.material = this.materials.antler_ivory || bodyMat;
+
+      const tuskR = tuskL.clone(`tuskR_${id}`);
+      tuskR.parent = head;
+      tuskR.position.x = 0.16;
+    } else {
+      // Rabbit
+      headNode.position.set(0, baseY + 0.12, bodyD * 0.4);
+
+      head = BABYLON.MeshBuilder.CreateSphere(`head_${id}`, { diameter: 0.22 }, this.scene);
+      head.parent = headNode;
+      head.position.set(0, 0.08, 0.08);
+      head.material = bodyMat;
+
+      // Long Rabbit Ears
+      const earL = BABYLON.MeshBuilder.CreateBox(`earL_${id}`, { width: 0.05, height: 0.24, depth: 0.04 }, this.scene);
+      earL.parent = head;
+      earL.position.set(-0.06, 0.18, 0);
+      earL.rotation.z = -0.15;
+      earL.material = bodyMat;
+
+      const earR = earL.clone(`earR_${id}`);
+      earR.parent = head;
+      earR.position.x = 0.06;
+      earR.rotation.z = 0.15;
+    }
+
+    // 4 Articulated Leg Pivots
+    const createAnimalLeg = (name: string, lx: number, lz: number, legH: number, legRadius: number) => {
+      const legPivot = new BABYLON.TransformNode(`${name}_pivot_${id}`, this.scene!);
+      legPivot.parent = root;
+      legPivot.position.set(lx, baseY, lz);
+
+      const legMesh = BABYLON.MeshBuilder.CreateCapsule(`${name}_mesh_${id}`, { height: legH, radius: legRadius }, this.scene!);
+      legMesh.parent = legPivot;
+      legMesh.position.set(0, -legH / 2, 0);
+      legMesh.material = bodyMat;
+
+      return legPivot;
+    };
+
+    const legH = baseY;
+    const legRad = species === 'BEAR' ? 0.16 : species === 'RABBIT' ? 0.04 : 0.08;
+    const halfW = bodyW * 0.38;
+    const halfD = bodyD * 0.35;
+
+    const legFL = createAnimalLeg('legFL', -halfW, halfD, legH, legRad);
+    const legFR = createAnimalLeg('legFR', halfW, halfD, legH, legRad);
+    const legBL = createAnimalLeg('legBL', -halfW, -halfD, legH, legRad);
+    const legBR = createAnimalLeg('legBR', halfW, -halfD, legH, legRad);
+
+    const rig: AnimalRig = {
+      root,
+      species,
+      body,
+      headNode,
+      head,
+      antlers,
+      legFL,
+      legFR,
+      legBL,
+      legBR,
+      walkPhase: 0,
+      baseY
+    };
+
+    this.animalRigs.set(id, rig);
+
+    if (this.shadowGenerator && this.quality !== 'LOW') {
+      this.shadowGenerator.addShadowCaster(body);
+    }
+
+    return rig;
+  }
+
+  animateAnimals(animals: AnimalEntityData[], dt: number): void {
+    const camPos = this.camera ? this.camera.position : null;
+
+    for (const animal of animals) {
+      const rig = this.animalRigs.get(animal.id);
+      if (!rig) continue;
+
+      const [ax, ay, az] = animal.fleeTarget || [0, 0, 0];
+
+      // Distance LOD Culling: Skip secondary calculations if beyond 85m
+      const distToCam = camPos ? Math.hypot(ax - camPos.x, az - camPos.z) : 0;
+      const isFar = distToCam > 85;
+
+      if (animal.hp <= 0) {
+        // Lay on side when dead (Harvestable ragdoll state)
+        rig.root.position.set(ax, ay + 0.18, az);
+        rig.root.rotation.z = lerp(rig.root.rotation.z, Math.PI / 2, 0.15);
+        rig.root.rotation.x = 0;
+        rig.legFL.rotation.x = lerp(rig.legFL.rotation.x, 0.2, 0.1);
+        rig.legFR.rotation.x = lerp(rig.legFR.rotation.x, 0.35, 0.1);
+        rig.legBL.rotation.x = lerp(rig.legBL.rotation.x, -0.2, 0.1);
+        rig.legBR.rotation.x = lerp(rig.legBR.rotation.x, -0.35, 0.1);
+        continue;
+      }
+
+      rig.root.rotation.z = 0;
+      rig.root.position.set(ax, ay, az);
+
+      const isFleeing = animal.state === 'FLEEING';
+      const isAttacking = animal.state === 'ATTACKING';
+      const isMoving = isFleeing || isAttacking || (animal.state === 'GRAZING' && Math.random() < 0.35);
+      const moveSpeed = isFleeing ? animal.speed * 2.4 : isAttacking ? animal.speed * 2.1 : 1.2;
+
+      if (rig.species === 'RABBIT') {
+        // Professional 3-stage Rabbit Bounding Hop (Crouch Gather -> Explosive Spring -> Forelimb Landing)
+        rig.hopTime = (rig.hopTime || 0) + dt * (isFleeing ? 6.5 : 3.2);
+        const hopCycle = rig.hopTime % (Math.PI * 2);
+
+        if (isMoving) {
+          const hopHeight = Math.max(0, Math.sin(hopCycle)) * (isFleeing ? 0.38 : 0.22);
+          const hopPitch = Math.cos(hopCycle) * (isFleeing ? 0.28 : 0.16);
+          rig.root.position.y = ay + hopHeight;
+          rig.root.rotation.x = hopPitch;
+
+          // Leg compression and extension
+          const legExt = Math.sin(hopCycle) * 0.6;
+          rig.legFL.rotation.x = -legExt;
+          rig.legFR.rotation.x = -legExt;
+          rig.legBL.rotation.x = legExt * 1.2;
+          rig.legBR.rotation.x = legExt * 1.2;
+        } else {
+          // Alert upright twitching pause
+          rig.root.position.y = ay;
+          rig.root.rotation.x = lerp(rig.root.rotation.x, 0, 0.15);
+          rig.headNode.rotation.y = Math.sin(Date.now() * 0.004 + animal.id) * 0.25;
+          rig.headNode.rotation.x = Math.sin(Date.now() * 0.008 + animal.id) * 0.1;
+        }
+      } else {
+        // Professional Quadruped Diagonal Trot / Gallop Locomotion
+        if (isMoving) {
+          rig.walkPhase += dt * moveSpeed * (isFleeing ? 4.2 : 3.0);
+          const legPhase = rig.walkPhase;
+          const strideAmp = isFleeing ? 0.72 : 0.42;
+
+          // Diagonal pairing: Front-Left with Back-Right, Front-Right with Back-Left
+          rig.legFL.rotation.x = Math.sin(legPhase) * strideAmp;
+          rig.legBR.rotation.x = Math.sin(legPhase) * strideAmp;
+          rig.legFR.rotation.x = -Math.sin(legPhase) * strideAmp;
+          rig.legBL.rotation.x = -Math.sin(legPhase) * strideAmp;
+
+          // Species-specific locomotion dynamics
+          if (rig.species === 'DEER') {
+            // Graceful undulating spine and bounding head motion
+            rig.body.position.y = (rig.baseY || 1.05) + Math.abs(Math.sin(legPhase * 2)) * (isFleeing ? 0.12 : 0.04);
+            rig.headNode.rotation.x = Math.sin(legPhase) * (isFleeing ? 0.18 : 0.08) + (isFleeing ? -0.15 : 0.0);
+            rig.root.rotation.x = isFleeing ? -0.08 : 0;
+          } else if (rig.species === 'WOLF') {
+            // Low predatory stalking spine arch and galloping stride
+            rig.root.rotation.x = isFleeing || isAttacking ? 0.12 : 0.04;
+            rig.headNode.rotation.x = -0.1 + Math.sin(legPhase) * 0.08;
+            rig.body.position.y = (rig.baseY || 0.75) + Math.abs(Math.sin(legPhase * 2)) * 0.06;
+          } else if (rig.species === 'BEAR') {
+            // Heavy weighted lumbering gait with side-to-side body roll
+            rig.body.rotation.z = Math.sin(legPhase * 0.5) * 0.12;
+            rig.body.position.y = (rig.baseY || 1.1) + Math.abs(Math.sin(legPhase)) * 0.05;
+            rig.headNode.rotation.y = Math.sin(legPhase * 0.5) * 0.08;
+          } else if (rig.species === 'BOAR') {
+            // Ground-hugging aggressive charge
+            rig.root.rotation.x = isAttacking ? 0.14 : 0.06;
+            rig.headNode.rotation.x = 0.22 + Math.sin(legPhase) * 0.08;
+          }
+        } else {
+          // Grazing, breathing, and ambient idle
+          rig.legFL.rotation.x = lerp(rig.legFL.rotation.x, 0, 0.12);
+          rig.legFR.rotation.x = lerp(rig.legFR.rotation.x, 0, 0.12);
+          rig.legBL.rotation.x = lerp(rig.legBL.rotation.x, 0, 0.12);
+          rig.legBR.rotation.x = lerp(rig.legBR.rotation.x, 0, 0.12);
+          rig.root.rotation.x = lerp(rig.root.rotation.x, 0, 0.12);
+          if (rig.body) rig.body.rotation.z = lerp(rig.body.rotation.z, 0, 0.12);
+
+          // Lower head to graze grass with subtle breathing rhythm
+          const grazeCycle = Math.sin(Date.now() * 0.0015 + animal.id);
+          rig.headNode.rotation.x = 0.35 + grazeCycle * 0.15;
+          rig.headNode.rotation.y = Math.sin(Date.now() * 0.0008 + animal.id) * 0.12;
+        }
+      }
+    }
   }
 
   updateLightingTime(gameHour: number, isUnderwater: boolean = false): void {
@@ -1031,7 +1356,6 @@ export class BabylonRenderBackend {
 
     const isDay = sunY > 0;
     const daylight = clamp(sunY * 1.6, 0.04, 1.0);
-    const isSunsetOrDawn = Math.abs(sunY) < 0.25;
 
     // Sun & Ambient intensities
     this.sun.intensity = isDay ? daylight * 2.0 : 0.08;
@@ -1040,27 +1364,23 @@ export class BabylonRenderBackend {
     // Sun & Sky color transitions (Dawn rose/gold, Midday bright blue, Dusk fiery orange, Night deep cosmic navy)
     let skyR = 0.04, skyG = 0.06, skyB = 0.12;
     if (gameHour >= 5 && gameHour < 8) {
-      // Dawn / Sunrise
       const t = (gameHour - 5) / 3;
       skyR = lerp(0.08, 0.58, t);
       skyG = lerp(0.1, 0.42, t);
       skyB = lerp(0.2, 0.48, t);
       this.sun.diffuse = new BABYLON.Color3(1.0, 0.82, 0.62);
     } else if (gameHour >= 8 && gameHour < 17) {
-      // Midday Clear Sky
       skyR = 0.42;
       skyG = 0.58;
       skyB = 0.72;
       this.sun.diffuse = new BABYLON.Color3(1.0, 0.98, 0.92);
     } else if (gameHour >= 17 && gameHour < 21) {
-      // Sunset / Golden Hour / Twilight
       const t = (gameHour - 17) / 4;
       skyR = lerp(0.55, 0.08, t);
       skyG = lerp(0.35, 0.06, t);
       skyB = lerp(0.25, 0.18, t);
       this.sun.diffuse = new BABYLON.Color3(1.0, 0.65, 0.35);
     } else {
-      // Night / Deep Navy Moonlight
       skyR = 0.03;
       skyG = 0.04;
       skyB = 0.1;
@@ -1080,7 +1400,6 @@ export class BabylonRenderBackend {
         Math.sin(now * 7.4 + s * 2) * 0.08 +
         Math.sin(now * 15.1 + s * 3) * 0.05;
 
-      // Lanterns are more prominent at night/dusk
       const timeFactor = daylight < 0.6 ? 1.3 : 0.85;
       entry.light.intensity = Math.max(0.2, entry.baseIntensity * timeFactor * (1.0 + flicker));
     }
@@ -1097,10 +1416,30 @@ export class BabylonRenderBackend {
     }
   }
 
-  updateCamera(pos: Vec3, yaw: number, pitch: number, crouched: boolean, targetFov: number = Math.PI / 3): void {
+  updateCamera(
+    pos: Vec3,
+    yaw: number,
+    pitch: number,
+    crouched: boolean,
+    targetFov: number = Math.PI / 3,
+    isMoving: boolean = false,
+    dt: number = 0.016
+  ): void {
     if (!this.camera) return;
-    const eyeY = crouched ? pos.y + 1.15 : pos.y + 1.65;
-    this.camera.position.set(pos.x, eyeY, pos.z);
+    const baseEyeY = crouched ? pos.y + 1.15 : pos.y + 1.65;
+
+    // Cinematic Lissajous Figure-8 Camera Bobbing when traversing the frontier
+    if (isMoving) {
+      this.headBobCycle += dt * 7.5;
+    } else {
+      this.headBobCycle = lerp(this.headBobCycle, 0, 0.1);
+    }
+
+    const bobIntensity = isMoving ? 0.025 : 0.0;
+    const bobX = Math.sin(this.headBobCycle * 0.5) * bobIntensity * 0.6;
+    const bobY = Math.abs(Math.cos(this.headBobCycle)) * bobIntensity;
+
+    this.camera.position.set(pos.x + bobX, baseEyeY + bobY, pos.z);
     this.camera.rotation.set(pitch, yaw, 0);
 
     // Smooth FOV interpolation for Aim Down Sights (ADS)
@@ -1112,7 +1451,9 @@ export class BabylonRenderBackend {
     isAiming: boolean,
     recoilKick: number,
     isMoving: boolean,
-    dt: number
+    dt: number,
+    lookDeltaX: number = 0,
+    lookDeltaY: number = 0
   ): void {
     if (!this.weaponViewModelRoot) return;
 
@@ -1121,15 +1462,23 @@ export class BabylonRenderBackend {
       node.setEnabled(id === weaponId);
     });
 
+    // Physics-Based Spring-Damper Inertia Sway
+    const swayTargetX = clamp(-lookDeltaX * 0.012, -0.06, 0.06);
+    const swayTargetY = clamp(lookDeltaY * 0.012, -0.05, 0.05);
+    this.swayOffsetX = lerp(this.swayOffsetX, swayTargetX, 0.2);
+    this.swayOffsetY = lerp(this.swayOffsetY, swayTargetY, 0.2);
+    this.swayRotY = lerp(this.swayRotY, -lookDeltaX * 0.025, 0.25);
+    this.swayRotX = lerp(this.swayRotX, lookDeltaY * 0.025, 0.25);
+
     // Determine target viewmodel position and rotation
-    let targetX = 0.24;
-    let targetY = -0.22;
+    let targetX = 0.24 + this.swayOffsetX;
+    let targetY = -0.22 + this.swayOffsetY;
     let targetZ = 0.48;
-    let targetRotX = 0;
-    let targetRotY = 0;
+    let targetRotX = this.swayRotX;
+    let targetRotY = this.swayRotY;
 
     if (isAiming) {
-      // Centered ADS alignment with sights
+      // Centered ADS alignment with iron sights
       if (weaponId === 'rifle_repeater') {
         targetX = 0.0;
         targetY = -0.138;
@@ -1152,26 +1501,32 @@ export class BabylonRenderBackend {
         targetZ = 0.36;
       }
     } else {
-      // Natural walking sway/bobbing
-      const time = Date.now() * 0.007;
+      // Natural walking sway and Lissajous figure-8 weapon bob
+      const time = Date.now() * 0.006;
       if (isMoving) {
-        targetX += Math.sin(time) * 0.02;
-        targetY += Math.abs(Math.cos(time)) * 0.015;
+        targetX += Math.sin(time) * 0.025;
+        targetY += Math.abs(Math.cos(time * 2)) * 0.018;
+        targetRotX += Math.sin(time) * 0.04;
+        targetRotY += Math.cos(time) * 0.04;
+      } else {
+        // Gentle organic breathing idle drift
+        targetY += Math.sin(time * 0.5) * 0.004;
+        targetRotX += Math.sin(time * 0.5) * 0.008;
       }
     }
 
-    // Apply recoil displacement (kicks back in Z and tilts up in X)
-    targetZ -= recoilKick * 0.15;
-    targetY += recoilKick * 0.04;
-    targetRotX -= recoilKick * 0.25;
+    // High-Impact Weapon Recoil: Barrel Climb + Slide Kick + Spring Return
+    targetZ -= recoilKick * 0.16;
+    targetY += recoilKick * 0.05;
+    targetRotX -= recoilKick * 0.32;
 
     // Smooth interpolation to target transform
-    this.weaponViewModelRoot.position.x = lerp(this.weaponViewModelRoot.position.x, targetX, 0.25);
-    this.weaponViewModelRoot.position.y = lerp(this.weaponViewModelRoot.position.y, targetY, 0.25);
-    this.weaponViewModelRoot.position.z = lerp(this.weaponViewModelRoot.position.z, targetZ, 0.25);
+    this.weaponViewModelRoot.position.x = lerp(this.weaponViewModelRoot.position.x, targetX, 0.28);
+    this.weaponViewModelRoot.position.y = lerp(this.weaponViewModelRoot.position.y, targetY, 0.28);
+    this.weaponViewModelRoot.position.z = lerp(this.weaponViewModelRoot.position.z, targetZ, 0.28);
 
-    this.weaponViewModelRoot.rotation.x = lerp(this.weaponViewModelRoot.rotation.x, targetRotX, 0.3);
-    this.weaponViewModelRoot.rotation.y = lerp(this.weaponViewModelRoot.rotation.y, targetRotY, 0.3);
+    this.weaponViewModelRoot.rotation.x = lerp(this.weaponViewModelRoot.rotation.x, targetRotX, 0.32);
+    this.weaponViewModelRoot.rotation.y = lerp(this.weaponViewModelRoot.rotation.y, targetRotY, 0.32);
 
     // Muzzle Flash Decay
     if (this.muzzleFlashTimer > 0) {
@@ -1229,62 +1584,145 @@ export class BabylonRenderBackend {
     }
   }
 
+  /**
+   * Professional Biomechanical Humanoid Animation Engine
+   * Features: 6-phase walk/run cycle, pelvic vertical bounce, counter-torso twisting, dynamic head gaze tracking, diaphragmatic breathing, flinch reaction & physical death collapse
+   */
   animateNPCs(agents: NPCAgentData[], dt: number): void {
+    const camPos = this.camera ? this.camera.position : null;
+
     for (const agent of agents) {
       const rig = this.npcRigs.get(agent.id);
       if (!rig) continue;
 
+      rig.idleTime = (rig.idleTime || 0) + dt;
+
+      // Distance LOD Culling
+      const distToCam = camPos ? Math.hypot(agent.position[0] - camPos.x, agent.position[2] - camPos.z) : 0;
+      const isClose = distToCam < 14;
+
       if (agent.hp <= 0) {
-        // Lay down if dead
-        rig.root.rotation.x = Math.PI / 2;
-        rig.root.position.set(agent.position[0], agent.position[1] + 0.2, agent.position[2]);
+        // Professional Multi-Stage Ragdoll Death Collapse
+        rig.deathWeight = Math.min(1.0, (rig.deathWeight || 0) + dt * 3.0);
+        const dw = rig.deathWeight;
+
+        rig.root.position.set(
+          agent.position[0],
+          lerp(agent.position[1], agent.position[1] + 0.15, dw),
+          agent.position[2]
+        );
+        rig.root.rotation.x = lerp(rig.root.rotation.x, Math.PI / 2, dw * 0.35);
+        rig.root.rotation.z = lerp(rig.root.rotation.z, 0.3, dw * 0.25);
+        rig.headNode.rotation.x = lerp(rig.headNode.rotation.x, 0.4, dw);
+        rig.leftArm.rotation.z = lerp(rig.leftArm.rotation.z, -0.6, dw);
+        rig.rightArm.rotation.z = lerp(rig.rightArm.rotation.z, 0.7, dw);
+        rig.leftLeg.rotation.x = lerp(rig.leftLeg.rotation.x, 0.15, dw);
+        rig.rightLeg.rotation.x = lerp(rig.rightLeg.rotation.x, -0.25, dw);
         continue;
       }
 
       rig.root.position.set(agent.position[0], agent.position[1], agent.position[2]);
 
       // Rotation towards heading
-      const angle = Math.atan2(agent.heading[0], agent.heading[2]);
-      rig.root.rotation.y = angle;
+      const headingAngle = Math.atan2(agent.heading[0], agent.heading[2]);
+      rig.root.rotation.y = headingAngle;
 
       const isSwimming = agent.state === 'SWIMMING';
-      const isMoving = agent.state === 'WALKING' || agent.state === 'RUNNING' || agent.state === 'FLEEING' || agent.state === 'ATTACKING' || isSwimming;
-      const strideSpeed = agent.state === 'RUNNING' || agent.state === 'FLEEING' ? 9 : isSwimming ? 3.2 : 4.5;
+      const isSprinting = agent.state === 'RUNNING' || agent.state === 'FLEEING';
+      const isMoving = agent.state === 'WALKING' || isSprinting || agent.state === 'ATTACKING' || isSwimming;
+      const strideSpeed = isSprinting ? 9.5 : isSwimming ? 3.4 : 4.8;
+
+      rig.strideBlend = lerp(rig.strideBlend || 0, isMoving ? 1.0 : 0.0, 0.15);
 
       if (isSwimming) {
         // Swimming breaststroke / flutter kick posture
-        rig.root.rotation.x = Math.PI * 0.35;
+        rig.root.rotation.x = lerp(rig.root.rotation.x, Math.PI * 0.38, 0.2);
         rig.walkPhase += dt * strideSpeed;
-        const armStroke = Math.sin(rig.walkPhase) * 0.8;
+        const armStroke = Math.sin(rig.walkPhase) * 0.85;
         rig.leftArm.rotation.x = armStroke;
         rig.rightArm.rotation.x = -armStroke;
-        rig.leftLeg.rotation.x = Math.sin(rig.walkPhase * 2) * 0.3;
-        rig.rightLeg.rotation.x = -Math.sin(rig.walkPhase * 2) * 0.3;
+        rig.leftLeg.rotation.x = Math.sin(rig.walkPhase * 2.2) * 0.35;
+        rig.rightLeg.rotation.x = -Math.sin(rig.walkPhase * 2.2) * 0.35;
       } else if (isMoving) {
-        rig.root.rotation.x = 0;
+        // Forward spine tilt when sprinting or fleeing
+        rig.root.rotation.x = lerp(rig.root.rotation.x, isSprinting ? 0.16 : 0.04, 0.15);
         rig.walkPhase += dt * strideSpeed;
-        const swing = Math.sin(rig.walkPhase) * 0.45;
+
+        const phase = rig.walkPhase;
+        const legAmp = isSprinting ? 0.78 : 0.46;
+        const armAmp = isSprinting ? 0.85 : 0.42;
+
+        // 1. Leg strides with alternating foot contact
+        const swing = Math.sin(phase) * legAmp;
         rig.leftLeg.rotation.x = -swing;
         rig.rightLeg.rotation.x = swing;
-        rig.leftArm.rotation.x = swing * 0.7;
-        rig.rightArm.rotation.x = -swing * 0.7;
+
+        // 2. Dynamic Arm Swings with natural elbow flare
+        rig.leftArm.rotation.x = swing * armAmp;
+        rig.rightArm.rotation.x = -swing * armAmp;
+        rig.leftArm.rotation.z = -0.06 + Math.abs(swing) * 0.12;
+        rig.rightArm.rotation.z = 0.06 - Math.abs(swing) * 0.12;
+
+        // 3. Pelvic vertical bounce & lateral hip weight shift
+        const pelvicBounce = Math.sin(phase * 2.0) * (isSprinting ? 0.06 : 0.03);
+        const hipSway = Math.sin(phase) * (isSprinting ? 0.03 : 0.015);
+        rig.torso.position.y = (rig.baseTorsoY - 0.28) + pelvicBounce;
+        rig.torso.position.x = hipSway;
+
+        // 4. Torso Counter-Rotation (Biomechanic opposition to hip rotation)
+        rig.torso.rotation.y = -Math.sin(phase) * (isSprinting ? 0.2 : 0.1);
       } else {
-        rig.root.rotation.x = 0;
-        rig.leftLeg.rotation.x = lerp(rig.leftLeg.rotation.x, 0, 0.1);
-        rig.rightLeg.rotation.x = lerp(rig.rightLeg.rotation.x, 0, 0.1);
-        rig.leftArm.rotation.x = lerp(rig.leftArm.rotation.x, 0, 0.1);
-        rig.rightArm.rotation.x = lerp(rig.rightArm.rotation.x, 0, 0.1);
+        // Natural Multi-Layered Idle State
+        rig.root.rotation.x = lerp(rig.root.rotation.x, 0, 0.12);
+        rig.torso.position.y = lerp(rig.torso.position.y, rig.baseTorsoY - 0.28, 0.1);
+        rig.torso.position.x = lerp(rig.torso.position.x, 0, 0.1);
+        rig.torso.rotation.y = lerp(rig.torso.rotation.y, 0, 0.1);
+
+        rig.leftLeg.rotation.x = lerp(rig.leftLeg.rotation.x, 0, 0.12);
+        rig.rightLeg.rotation.x = lerp(rig.rightLeg.rotation.x, 0, 0.12);
+        rig.leftArm.rotation.x = lerp(rig.leftArm.rotation.x, 0, 0.12);
+        rig.rightArm.rotation.x = lerp(rig.rightArm.rotation.x, 0, 0.12);
+        rig.leftArm.rotation.z = lerp(rig.leftArm.rotation.z, -0.08, 0.12);
+        rig.rightArm.rotation.z = lerp(rig.rightArm.rotation.z, 0.08, 0.12);
+
+        // Weight shift between feet every 4 seconds
+        const weightShift = Math.sin(rig.idleTime * 0.7) * 0.02;
+        rig.torso.position.x = weightShift;
       }
 
-      // Procedural breathing & weight shifting
-      rig.torso.scaling.z = 1.0 + Math.sin(Date.now() * 0.003 + agent.id) * 0.03;
+      // Dynamic Social Head & Eye Tracking (Smoothly turns head to look at Player)
+      if (isClose && camPos && agent.state !== 'FLEEING') {
+        const dx = camPos.x - agent.position[0];
+        const dz = camPos.z - agent.position[2];
+        const dy = camPos.y - (agent.position[1] + 1.5);
+        const lookAngle = Math.atan2(dx, dz);
+        let deltaYaw = lookAngle - headingAngle;
 
-      // Eye blinking
+        // Normalize delta angle
+        while (deltaYaw > Math.PI) deltaYaw -= Math.PI * 2;
+        while (deltaYaw < -Math.PI) deltaYaw += Math.PI * 2;
+
+        const targetGazeYaw = clamp(deltaYaw, -0.85, 0.85); // Neck turn limit
+        const targetGazePitch = clamp(-dy * 0.25, -0.35, 0.35);
+
+        rig.headNode.rotation.y = lerp(rig.headNode.rotation.y, targetGazeYaw, 0.15);
+        rig.headNode.rotation.x = lerp(rig.headNode.rotation.x, targetGazePitch, 0.15);
+      } else {
+        // Natural ambient head sway
+        rig.headNode.rotation.y = lerp(rig.headNode.rotation.y, Math.sin(rig.idleTime * 0.5) * 0.08, 0.08);
+        rig.headNode.rotation.x = lerp(rig.headNode.rotation.x, 0, 0.08);
+      }
+
+      // Diaphragmatic breathing chest expansion
+      rig.torso.scaling.z = 1.0 + Math.sin(rig.idleTime * 2.2 + agent.id) * 0.035;
+      rig.torso.scaling.x = 1.0 + Math.sin(rig.idleTime * 2.2 + agent.id) * 0.018;
+
+      // Realistic Eye Blinking with micro-saccades
       rig.blinkTimer -= dt;
       if (rig.blinkTimer <= 0) {
         rig.leftEye.scaling.y = 0.1;
         rig.rightEye.scaling.y = 0.1;
-        if (rig.blinkTimer < -0.15) {
+        if (rig.blinkTimer < -0.14) {
           rig.leftEye.scaling.y = 1.0;
           rig.rightEye.scaling.y = 1.0;
           rig.blinkTimer = Math.random() * 4 + 2.5;
@@ -1294,6 +1732,43 @@ export class BabylonRenderBackend {
   }
 
   render(): void {
-    this.scene?.render();
+    if (this.engine && this.scene) {
+      // Realtime FPS tracking & Adaptive scaling calculation
+      const now = performance.now();
+      const frameDelta = now - this.lastFrameTimestamp;
+      this.lastFrameTimestamp = now;
+
+      if (frameDelta > 0 && frameDelta < 250) {
+        this.frameTimes.push(frameDelta);
+        if (this.frameTimes.length > 30) this.frameTimes.shift();
+        const avgDelta = this.frameTimes.reduce((a, b) => a + b, 0) / this.frameTimes.length;
+        this.currentFps = Math.min(120, Math.round(1000 / (avgDelta || 16.6)));
+      }
+
+      // Dynamic adaptive hardware scaling if FPS drops on low-tier hardware
+      this.adaptiveScalingTimer += frameDelta * 0.001;
+      if (this.adaptiveScalingTimer > 3.0) {
+        this.adaptiveScalingTimer = 0;
+        if (this.currentFps < 45 && this.quality !== 'ULTRA') {
+          const currentScale = this.engine.getHardwareScalingLevel();
+          if (currentScale < 1.6) {
+            this.engine.setHardwareScalingLevel(currentScale + 0.15);
+          }
+        }
+      }
+
+      const canvas = this.engine.getRenderingCanvas();
+      if (canvas && canvas.clientWidth > 0 && canvas.clientHeight > 0) {
+        const hwScaling = this.engine.getHardwareScalingLevel();
+        const renderW = this.engine.getRenderWidth();
+        const renderH = this.engine.getRenderHeight();
+        const expectedW = Math.round(canvas.clientWidth / hwScaling);
+        const expectedH = Math.round(canvas.clientHeight / hwScaling);
+        if (Math.abs(renderW - expectedW) > 3 || Math.abs(renderH - expectedH) > 3) {
+          this.engine.resize();
+        }
+      }
+      this.scene.render();
+    }
   }
 }

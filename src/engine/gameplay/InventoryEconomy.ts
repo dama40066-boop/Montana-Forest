@@ -100,14 +100,34 @@ export const INITIAL_PLAYER_INVENTORY: InventoryItem[] = [
     stats: { heal: 40 }
   },
   {
+    id: 'canteen_water',
+    name: 'Spring Water Canteen',
+    category: 'consumable',
+    count: 3,
+    value: 8,
+    description: 'Fresh, ice-cold mountain spring water. Quenches 45 Thirst and restores 15 Stamina.',
+    icon: 'Droplets',
+    stats: { thirst: 45, stamina: 15 }
+  },
+  {
     id: 'cooked_venison',
     name: 'Smoked Venison Steak',
     category: 'consumable',
     count: 3,
     value: 12,
-    description: 'Tender venison smoked over pine embers. Restores 25 Health and 50 Stamina.',
+    description: 'Tender venison smoked over pine embers. Satiates 45 Hunger, restores 25 Health and 30 Stamina.',
     icon: 'Coffee',
-    stats: { heal: 25, stamina: 50 }
+    stats: { hunger: 45, heal: 25, stamina: 30 }
+  },
+  {
+    id: 'wild_berries',
+    name: 'Wild Alpine Berries',
+    category: 'consumable',
+    count: 5,
+    value: 4,
+    description: 'Sweet gathered blackberries & huckleberries. Satiates 15 Hunger & quenches 15 Thirst.',
+    icon: 'Apple',
+    stats: { hunger: 15, thirst: 15, heal: 5 }
   }
 ];
 
@@ -161,12 +181,30 @@ export const CRAFTING_RECIPES: CraftingRecipe[] = [
       category: 'consumable',
       count: 1,
       value: 12,
-      description: 'Restores 25 Health and 50 Stamina.',
+      description: 'Satiates 45 Hunger, restores 25 Health and 30 Stamina.',
       icon: 'Coffee',
-      stats: { heal: 25, stamina: 50 }
+      stats: { hunger: 45, heal: 25, stamina: 30 }
     },
     ingredients: [
       { itemId: 'raw_meat', name: 'Raw Carcass Meat', count: 1 }
+    ]
+  },
+  {
+    id: 'cook_stew',
+    name: 'Hearty Pioneer Stew',
+    resultItem: {
+      id: 'pioneer_stew',
+      name: 'Hearty Pioneer Stew',
+      category: 'consumable',
+      count: 1,
+      value: 24,
+      description: 'Slow-simmered stew with venison, roots and spring water. Satiates 75 Hunger, 40 Thirst & restores 50 HP.',
+      icon: 'Coffee',
+      stats: { hunger: 75, thirst: 40, heal: 50, stamina: 40 }
+    },
+    ingredients: [
+      { itemId: 'raw_meat', name: 'Raw Carcass Meat', count: 1 },
+      { itemId: 'herb_yarrow', name: 'Forest Herbs', count: 1 }
     ]
   }
 ];

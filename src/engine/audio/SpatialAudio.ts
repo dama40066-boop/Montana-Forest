@@ -27,6 +27,14 @@ export class SpatialAudioEngine {
   ];
   private chordIndex = 0;
 
+  public getAudioContext(): AudioContext | null {
+    return this.ctx;
+  }
+
+  public getSfxGain(): GainNode | null {
+    return this.sfxGain;
+  }
+
   public setMasterVolume(val: number): void {
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setValueAtTime(clamp(val, 0, 1), this.ctx.currentTime);
@@ -324,7 +332,7 @@ export class SpatialAudioEngine {
     osc.stop(now + 0.05);
   }
 
-  playFootstep(surface: 'grass' | 'mud' | 'rock' | 'wood' | 'water', intensity: number = 0.5): void {
+  playFootstep(surface: 'grass' | 'mud' | 'dirt' | 'rock' | 'wood' | 'water' | 'snow', intensity: number = 0.5): void {
     if (!this.ctx || !this.sfxGain) return;
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -333,13 +341,15 @@ export class SpatialAudioEngine {
     const freqMap: Record<string, number> = {
       grass: 120,
       mud: 85,
+      dirt: 105,
       rock: 190,
-      wood: 150,
-      water: 95
+      wood: 165,
+      water: 95,
+      snow: 220
     };
 
     const freq = freqMap[surface] || 120;
-    osc.type = surface === 'water' ? 'sine' : 'triangle';
+    osc.type = surface === 'water' ? 'sine' : surface === 'snow' ? 'sawtooth' : 'triangle';
     osc.frequency.setValueAtTime(freq + Math.random() * 20, now);
     osc.frequency.exponentialRampToValueAtTime(35, now + 0.06);
 

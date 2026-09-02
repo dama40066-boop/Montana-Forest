@@ -1,4 +1,4 @@
-// #20 SAVE_SYSTEM - IndexedDB Snapshot Persistence, Version Migration & State Deserialization
+// #20 SAVE_SYSTEM - IndexedDB Snapshot Persistence, Version Migration & State Deserialization with In-Memory Fallback
 import { PlayerStats } from '../../types/game';
 import { NPCAgentData } from '../ai/NPCBrain';
 
@@ -43,45 +43,99 @@ export class SaveSystem {
   private dbName = 'VanishingPinesDB_v3';
   private storeName = 'saves';
   private db: IDBDatabase | null = null;
+  private memoryFallback: Map<string, GameSaveData> = new Map();
+  private isIndexedDBAvailable: boolean = true;
 
   async open(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(this.dbName, 1);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains(this.storeName)) {
-          db.createObjectStore(this.storeName);
-        }
-      };
-      req.onsuccess = () => {
-        this.db = req.result;
+    if (typeof indexedDB === 'undefined') {
+      this.isIndexedDBAvailable = false;
+      return;
+    }
+
+    return new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(this.dbName, 1);
+        req.onupgradeneeded = () => {
+          try {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(this.storeName)) {
+              db.createObjectStore(this.storeName);
+            }
+          } catch {
+            this.isIndexedDBAvailable = false;
+          }
+        };
+        req.onsuccess = () => {
+          this.db = req.result;
+          resolve();
+        };
+        req.onerror = () => {
+          console.warn('IndexedDB unavailable, falling back to in-memory state.');
+          this.isIndexedDBAvailable = false;
+          resolve();
+        };
+      } catch {
+        this.isIndexedDBAvailable = false;
         resolve();
-      };
-      req.onerror = () => reject(req.error);
+      }
     });
   }
 
   async saveGame(data: GameSaveData): Promise<void> {
-    if (!this.db) await this.open();
-    return new Promise((resolve, reject) => {
-      if (!this.db) return reject(new Error('IndexedDB not initialized'));
-      const tx = this.db.transaction(this.storeName, 'readwrite');
-      const store = tx.objectStore(this.storeName);
-      const req = store.put(data, 'main_slot');
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+    if (!this.isIndexedDBAvailable) {
+      this.memoryFallback.set('main_slot', data);
+      return;
+    }
+
+    if (!this.db) {
+      await this.open();
+    }
+
+    if (!this.db || !this.isIndexedDBAvailable) {
+      this.memoryFallback.set('main_slot', data);
+      return;
+    }
+
+    return new Promise((resolve) => {
+      try {
+        const tx = this.db!.transaction(this.storeName, 'readwrite');
+        const store = tx.objectStore(this.storeName);
+        const req = store.put(data, 'main_slot');
+        req.onsuccess = () => resolve();
+        req.onerror = () => {
+          this.memoryFallback.set('main_slot', data);
+          resolve();
+        };
+      } catch {
+        this.memoryFallback.set('main_slot', data);
+        resolve();
+      }
     });
   }
 
   async loadGame(): Promise<GameSaveData | null> {
-    if (!this.db) await this.open();
-    return new Promise((resolve, reject) => {
-      if (!this.db) return reject(new Error('IndexedDB not initialized'));
-      const tx = this.db.transaction(this.storeName, 'readonly');
-      const store = tx.objectStore(this.storeName);
-      const req = store.get('main_slot');
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error);
+    if (!this.isIndexedDBAvailable) {
+      return this.memoryFallback.get('main_slot') || null;
+    }
+
+    if (!this.db) {
+      await this.open();
+    }
+
+    if (!this.db || !this.isIndexedDBAvailable) {
+      return this.memoryFallback.get('main_slot') || null;
+    }
+
+    return new Promise((resolve) => {
+      try {
+        const tx = this.db!.transaction(this.storeName, 'readonly');
+        const store = tx.objectStore(this.storeName);
+        const req = store.get('main_slot');
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(this.memoryFallback.get('main_slot') || null);
+      } catch {
+        resolve(this.memoryFallback.get('main_slot') || null);
+      }
     });
   }
 }

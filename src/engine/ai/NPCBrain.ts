@@ -37,6 +37,7 @@ export interface NPCAgentData {
   memories: NPCMemory[];
   relationships: Map<string, NPCRelationship>;
   nextDecisionTimer: number;
+  attackTimer?: number;
   socialTargetId?: number;
   socialTimer?: number;
   activeSpeechBubble?: string;

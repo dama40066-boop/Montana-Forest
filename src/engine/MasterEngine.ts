@@ -9,6 +9,7 @@ import { CrimeWantedSystem } from './gameplay/CrimeWantedSystem';
 import { INITIAL_PLAYER_INVENTORY, generateDialogue, DialogueNode, CRAFTING_RECIPES } from './gameplay/InventoryEconomy';
 import { WEAPON_DEFINITIONS, getWeaponDef, QUICK_WEAPON_SLOTS } from './gameplay/WeaponsRegistry';
 import { SpatialAudioEngine } from './audio/SpatialAudio';
+import { SurfaceAudioManager } from './audio/SurfaceAudioManager';
 import { SaveSystem } from './save/SaveSystem';
 import { BabylonRenderBackend } from './render/BabylonBackend';
 import { PlayerStats, BountyContract, InventoryItem, AnimalEntityData, PlayerStance, WeaponDefinition } from '../types/game';
@@ -29,6 +30,7 @@ export class MasterEngine {
   public ai: NPCAISystem = new NPCAISystem();
   public crime: CrimeWantedSystem = new CrimeWantedSystem();
   public audio: SpatialAudioEngine = new SpatialAudioEngine();
+  public surfaceAudio: SurfaceAudioManager = new SurfaceAudioManager(this.world);
   public saves: SaveSystem = new SaveSystem();
   public renderBackend: BabylonRenderBackend = new BabylonRenderBackend();
 
@@ -57,11 +59,19 @@ export class MasterEngine {
   public playerBody: RigidBody | null = null;
   public playerYaw: number = 0;
   public playerPitch: number = 0;
+  public lastRecordedYaw: number = 0;
+  public lastRecordedPitch: number = 0;
   public playerStats: PlayerStats = {
     hp: 100,
     maxHp: 100,
     stamina: 100,
     maxStamina: 100,
+    hunger: 100,
+    maxHunger: 100,
+    thirst: 100,
+    maxThirst: 100,
+    isStarving: false,
+    isDehydrated: false,
     gold: 50,
     reputation: {
       townsfolk: 10,
@@ -106,6 +116,8 @@ export class MasterEngine {
   public targetedAnimal: AnimalEntityData | null = null;
   public isNearWantedBoard: boolean = false;
   public isNearCampfire: boolean = false;
+  public isNearWaterSource: boolean = false;
+  private survivalWarningTimer: number = 0;
 
   // UI Dialog / Modal States
   public activeDialogue: { agent: NPCAgentData; node: DialogueNode } | null = null;
@@ -141,6 +153,10 @@ export class MasterEngine {
     this.animals.initAnimals(this.world);
     this.ai.initAgents(this.world);
     this.crime.initContracts();
+
+    for (const animal of this.animals.animals) {
+      this.renderBackend.createAnimalRig(animal.id, animal.species, animal.name);
+    }
 
     // 4. Create Player Entity & Physics Capsule
     this.playerEntity = this.ecs.create('Player');
@@ -184,22 +200,24 @@ export class MasterEngine {
 
       // Front Porch Structure for Saloon, Sheriff, General Store, Lodge
       if (b.type === 'tavern' || b.type === 'sheriff' || b.type === 'shop' || b.type === 'lodge') {
-        // Porch Deck Floor (walkable platform at ground height)
+        const porchDepth = 2.2;
+        const bY = this.world.height(b.x, b.z);
+        // Porch Deck Floor (walkable platform at foundation height matching 3D visual mesh)
         const porchFloor = this.ecs.create(`PorchDeck_${b.name}`);
         const pfTr = porchFloor.add('transform', new TransformComponent());
-        pfTr.position.set(b.x, this.world.height(b.x, b.z) + 0.25, b.z + b.d / 2 + 1.1);
-        this.physics.addStatic(porchFloor, new AABBCollider(b.w, 0.4, 2.2));
+        pfTr.position.set(b.x, bY + 0.35, b.z - b.d / 2 - porchDepth / 2);
+        this.physics.addStatic(porchFloor, new AABBCollider(b.w + 0.2, 0.5, porchDepth));
 
         // Left & Right Porch Support Pillar Colliders
         const postLeft = this.ecs.create(`PorchPostL_${b.name}`);
         const plTr = postLeft.add('transform', new TransformComponent());
-        plTr.position.set(b.x - b.w / 2 + 0.3, this.world.height(b.x, b.z) + 1.5, b.z + b.d / 2 + 2.0);
-        this.physics.addStatic(postLeft, new CapsuleCollider(0.2, 3.0));
+        plTr.position.set(b.x - b.w / 2 + 0.3, bY + 1.5, b.z - b.d / 2 - porchDepth + 0.2);
+        this.physics.addStatic(postLeft, new CapsuleCollider(0.22, 3.2));
 
         const postRight = this.ecs.create(`PorchPostR_${b.name}`);
         const prTr = postRight.add('transform', new TransformComponent());
-        prTr.position.set(b.x + b.w / 2 - 0.3, this.world.height(b.x, b.z) + 1.5, b.z + b.d / 2 + 2.0);
-        this.physics.addStatic(postRight, new CapsuleCollider(0.2, 3.0));
+        prTr.position.set(b.x + b.w / 2 - 0.3, bY + 1.5, b.z - b.d / 2 - porchDepth + 0.2);
+        this.physics.addStatic(postRight, new CapsuleCollider(0.22, 3.2));
       }
     }
 
@@ -271,6 +289,13 @@ export class MasterEngine {
 
   public triggerJump(): void {
     if (this.playerBody && this.playerBody.grounded && this.playerStats.stamina >= 15) {
+      if (this.playerEntity) {
+        const tr = this.playerEntity.get<TransformComponent>('transform');
+        if (tr) {
+          const surface = this.surfaceAudio.detectSurface(tr.position, this.playerStats.isUnderwater);
+          this.surfaceAudio.playFootstepSound({ surface, intensity: 0.85 });
+        }
+      }
       this.playerBody.applyImpulse(new Vec3(0, 5.4 * this.playerBody.mass, 0));
       this.playerStats.stamina -= 15;
       this.playerBody.grounded = false;
@@ -421,6 +446,40 @@ export class MasterEngine {
       }
     }
 
+    // Hunger & Thirst Decay Simulation
+    const isSprinting = isRunning && (forward !== 0 || strafe !== 0);
+    const hungerDecayRate = isSprinting ? 0.22 : isPlayerInWater ? 0.20 : 0.10;
+    const thirstDecayRate = isSprinting ? 0.38 : isPlayerInWater ? 0.24 : 0.18;
+
+    this.playerStats.hunger = Math.max(0, this.playerStats.hunger - hungerDecayRate * dt);
+    this.playerStats.thirst = Math.max(0, this.playerStats.thirst - thirstDecayRate * dt);
+
+    this.playerStats.isStarving = this.playerStats.hunger <= 0;
+    this.playerStats.isDehydrated = this.playerStats.thirst <= 0;
+
+    // Starvation & Dehydration Health Penalties
+    if (this.playerStats.isStarving) {
+      this.playerStats.hp = Math.max(0, this.playerStats.hp - dt * 1.2);
+    }
+    if (this.playerStats.isDehydrated) {
+      this.playerStats.hp = Math.max(0, this.playerStats.hp - dt * 2.2);
+    }
+
+    // Periodic survival warnings
+    this.survivalWarningTimer += dt;
+    if (this.survivalWarningTimer > 35) {
+      if (this.playerStats.isStarving && this.playerStats.isDehydrated) {
+        this.setToast('⚠️ CRITICAL: Starving & Dehydrated! Consume food & water immediately!');
+        this.survivalWarningTimer = 0;
+      } else if (this.playerStats.isDehydrated) {
+        this.setToast('⚠️ DEHYDRATION: You are dying of thirst! Drink water or find a stream!');
+        this.survivalWarningTimer = 0;
+      } else if (this.playerStats.isStarving) {
+        this.setToast('⚠️ STARVATION: You are starving! Eat meat, stew or berries to survive.');
+        this.survivalWarningTimer = 0;
+      }
+    }
+
     let targetSpeed = 4.2;
     if (isDeepWater) {
       targetSpeed = isRunning ? 4.8 : 3.0;
@@ -428,11 +487,23 @@ export class MasterEngine {
       targetSpeed = 2.2;
     } else if (this.playerStats.stance === 'PRONE') {
       targetSpeed = 1.2;
-    } else if (isRunning && (forward !== 0 || strafe !== 0)) {
+    } else if (isSprinting) {
       targetSpeed = 7.4;
       this.playerStats.stamina = Math.max(0, this.playerStats.stamina - dt * 14);
     } else {
-      this.playerStats.stamina = Math.min(this.playerStats.maxStamina, this.playerStats.stamina + dt * 12);
+      // Stamina recovery: halted by dehydration, throttled and capped to 35 by starvation
+      if (!this.playerStats.isDehydrated) {
+        const maxRecoverableStamina = this.playerStats.isStarving ? 35 : this.playerStats.maxStamina;
+        const regenRate = this.playerStats.isStarving ? 5.0 : 12.0;
+        if (this.playerStats.stamina < maxRecoverableStamina) {
+          this.playerStats.stamina = Math.min(maxRecoverableStamina, this.playerStats.stamina + dt * regenRate);
+        }
+      }
+    }
+
+    // Movement speed penalty for severe dehydration
+    if (this.playerStats.isDehydrated) {
+      targetSpeed *= 0.72;
     }
 
     const fx = Math.sin(this.playerYaw);
@@ -494,6 +565,42 @@ export class MasterEngine {
       this.playerStats.wantedLevel,
       this.world
     );
+
+    // 4.5. Process NPC Attacks on Player
+    for (const agent of this.ai.agents) {
+      if (agent.state === 'ATTACKING') {
+        const dist = Math.hypot(agent.position[0] - pPos.x, agent.position[2] - pPos.z);
+        if (dist < 22 && this.playerStats.hp > 0) {
+          agent.attackTimer = (agent.attackTimer || 0) + dt;
+          if (agent.attackTimer > 1.8) {
+            agent.attackTimer = 0;
+            // Line of sight check
+            const toPlayer = new Vec3(pPos.x - agent.position[0], (pPos.y + 0.8) - (this.world.height(agent.position[0], agent.position[2]) + 1.2), pPos.z - agent.position[2]);
+            const pDist = toPlayer.length;
+            const dir = toPlayer.normalize();
+            
+            const hit = this.physics.raycast(
+              new Vec3(agent.position[0], this.world.height(agent.position[0], agent.position[2]) + 1.2, agent.position[2]),
+              dir,
+              pDist,
+              (x, z) => this.world.height(x, z)
+            );
+            
+            // If we didn't hit terrain before reaching the player, deal damage
+            if (!hit || hit.distance >= pDist - 1.0) {
+              this.playerStats.hp = Math.max(0, this.playerStats.hp - 15);
+              this.setToast(`Shot by ${agent.name}!`);
+              this.audio.playRevolverShot();
+              
+              this.renderBackend.addBulletTracer(
+                [agent.position[0], this.world.height(agent.position[0], agent.position[2]) + 1.2, agent.position[2]],
+                [pPos.x, pPos.y + 1, pPos.z]
+              );
+            }
+          }
+        }
+      }
+    }
 
     // 5. Update Arrow Physics Projectiles
     this.updateArrowProjectiles(dt);
@@ -813,12 +920,22 @@ export class MasterEngine {
     // Check interaction targets
     this.checkInteractionTargets(tr.position);
 
-    // Dynamic footstep sounds
-    if (this.playerBody && this.playerBody.grounded && this.playerBody.velocity.length > 0.8) {
-      if (Math.random() < 0.045) {
-        const surface = this.world.surfaceType(tr.position.x, tr.position.z);
-        this.audio.playFootstep(surface, this.playerBody.velocity.length / 7.4);
-      }
+    // Dynamic surface-aware footstep audio manager (wood, dirt, snow, water, rock, grass)
+    const audioCtx = this.audio.getAudioContext();
+    const sfxGain = this.audio.getSfxGain();
+    if (audioCtx && sfxGain) {
+      this.surfaceAudio.init(audioCtx, sfxGain);
+    }
+
+    if (this.playerBody) {
+      this.surfaceAudio.update(
+        tr.position,
+        this.playerBody.velocity,
+        this.playerBody.grounded,
+        this.playerStats.stance,
+        dt,
+        this.playerStats.isUnderwater
+      );
     }
   }
 
@@ -857,22 +974,32 @@ export class MasterEngine {
     const targetFov = this.playerStats.isAiming ? (wDef.zoomFov * Math.PI) / 180 : Math.PI / 3;
     const isMoving = this.playerBody ? this.playerBody.velocity.length > 0.4 : false;
 
+    const deltaYaw = this.playerYaw - (this.lastRecordedYaw || this.playerYaw);
+    const deltaPitch = this.playerPitch - (this.lastRecordedPitch || this.playerPitch);
+    this.lastRecordedYaw = this.playerYaw;
+    this.lastRecordedPitch = this.playerPitch;
+
     this.renderBackend.updateLightingTime(hour, this.playerStats.isUnderwater);
     this.renderBackend.updateCamera(
       tr.position,
       this.playerYaw,
       this.playerPitch,
       this.playerStats.stance === 'CROUCH',
-      targetFov
+      targetFov,
+      isMoving,
+      0.016
     );
     this.renderBackend.updateWeaponViewmodel(
       this.playerStats.equippedWeapon,
       this.playerStats.isAiming,
       this.playerStats.recoilKick,
       isMoving,
-      0.016
+      0.016,
+      deltaYaw * 40,
+      deltaPitch * 40
     );
     this.renderBackend.animateNPCs(this.ai.agents, 0.016);
+    this.renderBackend.animateAnimals(this.animals.animals, 0.016);
     this.renderBackend.render();
   }
 
@@ -1036,6 +1163,11 @@ export class MasterEngine {
     this.isNearWantedBoard = Math.hypot(24 - playerPos.x, 12 - playerPos.z) < 4.5;
     // Check Campfire near tavern (26, 28)
     this.isNearCampfire = Math.hypot(26 - playerPos.x, 28 - playerPos.z) < 4.0;
+
+    // Check Water Source (in water, shoreline, river, or town well at 18, 22)
+    const isAtTownWell = Math.hypot(18 - playerPos.x, 22 - playerPos.z) < 3.5;
+    const isNearNaturalWater = playerPos.y < this.world.waterHeight + 1.2 && this.world.height(playerPos.x, playerPos.z) < this.world.waterHeight + 0.8;
+    this.isNearWaterSource = isAtTownWell || isNearNaturalWater || this.playerStats.isSwimming;
   }
 
   public handleInteract(): void {
@@ -1071,6 +1203,41 @@ export class MasterEngine {
       // Open dynamic dialogue
       const node = generateDialogue(this.targetedNPC, this.playerStats);
       this.activeDialogue = { agent: this.targetedNPC, node };
+      return;
+    }
+
+    // Interact with campfire to roast meat if held
+    if (this.isNearCampfire) {
+      const rawMeat = this.playerStats.inventory.find((i) => i.id === 'raw_meat');
+      if (rawMeat && rawMeat.count > 0) {
+        rawMeat.count--;
+        if (rawMeat.count <= 0) {
+          const idx = this.playerStats.inventory.indexOf(rawMeat);
+          if (idx !== -1) this.playerStats.inventory.splice(idx, 1);
+        }
+        const cookedItem: InventoryItem = {
+          id: 'cooked_venison',
+          name: 'Smoked Venison Steak',
+          category: 'consumable',
+          count: 1,
+          value: 12,
+          description: 'Satiates 45 Hunger, restores 25 Health and 30 Stamina.',
+          icon: 'Coffee',
+          stats: { hunger: 45, heal: 25, stamina: 30 }
+        };
+        this.addItemToInventory(cookedItem);
+        this.setToast('🔥 Roasted meat over campfire! Added Smoked Venison Steak to backpack.');
+        return;
+      }
+    }
+
+    // Drink fresh water if near a water source / well / lake
+    if (this.isNearWaterSource) {
+      this.playerStats.thirst = Math.min(this.playerStats.maxThirst, this.playerStats.thirst + 45);
+      this.playerStats.stamina = Math.min(this.playerStats.maxStamina, this.playerStats.stamina + 15);
+      this.playerStats.isDehydrated = false;
+      this.audio.playFootstep('water', 0.8);
+      this.setToast('💧 Drank clean spring water (+45 Thirst, +15 Stamina)!');
       return;
     }
   }

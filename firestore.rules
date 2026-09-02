@@ -1,0 +1,98 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    // Validation Blueprint for RegisteredPlayer
+    function isValidRegisteredPlayer(data, uid) {
+      return data.keys().hasAll(['uid', 'registeredAt']) &&
+        data.keys().size() == 2 &&
+        data.uid is string &&
+        data.uid == request.auth.uid &&
+        data.uid == uid &&
+        data.registeredAt is timestamp &&
+        data.registeredAt == request.time;
+    }
+
+    // Validation Blueprint for PlayerCounter
+    function isValidPlayerCounter(data) {
+      return data.keys().hasAll(['totalUniquePlayers', 'updatedAt']) &&
+        data.keys().size() == 2 &&
+        data.totalUniquePlayers is number &&
+        data.totalUniquePlayers >= 0 &&
+        data.updatedAt is timestamp &&
+        data.updatedAt == request.time;
+    }
+
+    // 1. Registered Players Collection (Single persistent registration per anonymous UID)
+    match /registered_players/{uid} {
+      // Individual player can check their own registration state
+      allow get: if isSignedIn() && isValidId(uid) && request.auth.uid == uid;
+      
+      // Strict prohibition of list queries to prevent user enumeration / scraping
+      allow list: if false;
+
+      // Only the authenticated user can register their own UID once
+      allow create: if isSignedIn() &&
+        isValidId(uid) &&
+        request.auth.uid == uid &&
+        isValidRegisteredPlayer(incoming(), uid);
+
+      // Immutability: registrations can never be altered or deleted by clients
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // 2. Global Aggregate Statistics & Unique Player Counter
+    match /stats/{statId} {
+      // Any authenticated or anonymous player can read the verified unique player counter
+      allow get: if isValidId(statId);
+      allow list: if false;
+
+      // Initial bootstrapping when the counter is first created
+      allow create: if isSignedIn() &&
+        statId == 'player_counter' &&
+        isValidPlayerCounter(incoming()) &&
+        incoming().totalUniquePlayers == 1 &&
+        existsAfter(/databases/$(database)/documents/registered_players/$(request.auth.uid));
+
+      // Atomic increment: strictly +1 linked to the simultaneous creation of the registered_players doc
+      allow update: if isSignedIn() &&
+        statId == 'player_counter' &&
+        isValidPlayerCounter(incoming()) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['totalUniquePlayers', 'updatedAt']) &&
+        incoming().totalUniquePlayers == existing().totalUniquePlayers + 1 &&
+        !exists(/databases/$(database)/documents/registered_players/$(request.auth.uid)) &&
+        existsAfter(/databases/$(database)/documents/registered_players/$(request.auth.uid));
+
+      allow delete: if false;
+    }
+
+    // Connection Health Verification endpoint
+    match /test/{docId} {
+      allow read: if true;
+    }
+  }
+}

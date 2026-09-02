@@ -145,6 +145,167 @@ export class PBRTextureGenerator {
   }
 
   /**
+   * Nano Banana Pro Ultra-Fidelity Timber & Cedar Wood Generator
+   * Features: Micro-fibrous wood grain, knot rings, aged varnish patina, bevelled plank joints, high dynamic range normals & satin sheen
+   */
+  generateNanoBananaProWoodPBR(size: number = 512, plankCount: number = 6): PBRTextureSet {
+    const albedoData = new Uint8Array(size * size * 4);
+    const ormData = new Uint8Array(size * size * 4);
+    const heightMap = new Float32Array(size * size);
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = x / size;
+        const v = y / size;
+        const idx = (y * size + x) * 4;
+        const hIdx = y * size + x;
+
+        // Plank edge divisions with beveling
+        const plankPos = (v * plankCount) % 1.0;
+        const plankEdgeDist = Math.min(plankPos, 1.0 - plankPos);
+        const isPlankSeam = plankEdgeDist < (2.0 / size);
+        const seamFactor = Math.max(0, 1.0 - plankEdgeDist / 0.04);
+
+        // High-octave wood grain fibers & turbulence
+        const baseGrain = fbm(u * 32.0 + fbm(u * 6.0, v * 0.8, 3, 0.5, 2.0, 311) * 3.5, v * 2.0, 5, 0.55, 2.3, 108);
+        const microFiber = smoothNoise(u * 128.0, v * 8.0, 421) * 0.18;
+
+        // Multi-knot whorls with radial grain distortion
+        const k1 = Math.hypot((u - 0.28) * 3.2, (v - 0.35) * 8.0);
+        const k2 = Math.hypot((u - 0.72) * 2.8, (v - 0.82) * 9.0);
+        const knot1 = Math.sin(k1 * 40.0) * Math.exp(-k1 * 4.2);
+        const knot2 = Math.sin(k2 * 36.0) * Math.exp(-k2 * 3.8);
+
+        const composite = baseGrain * 0.65 + microFiber + knot1 * 0.28 + knot2 * 0.22;
+
+        // Warm aged cedar & golden walnut albedo
+        const baseR = 158 + composite * 55 - seamFactor * 65;
+        const baseG = 104 + composite * 40 - seamFactor * 52;
+        const baseB = 62 + composite * 26 - seamFactor * 42;
+
+        albedoData[idx + 0] = Math.min(255, Math.max(0, Math.round(baseR)));
+        albedoData[idx + 1] = Math.min(255, Math.max(0, Math.round(baseG)));
+        albedoData[idx + 2] = Math.min(255, Math.max(0, Math.round(baseB)));
+        albedoData[idx + 3] = 255;
+
+        // High dynamic range height
+        let h = composite * 0.5 - seamFactor * 0.9;
+        if (isPlankSeam) h -= 0.8;
+        heightMap[hIdx] = h;
+
+        // Nano Banana Pro ORM: Satin polished varnish with deep crevice AO
+        const ao = Math.round(Math.max(25, (1.0 - seamFactor * 0.85 - (1.0 - composite) * 0.2) * 255));
+        const roughness = Math.round(Math.max(60, Math.min(235, (0.52 + (1.0 - composite) * 0.28 + seamFactor * 0.15) * 255)));
+        const metallic = Math.round(Math.min(20, knot1 > 0 ? knot1 * 30 : 0)); // Subtle amber resin sheen
+
+        ormData[idx + 0] = ao;
+        ormData[idx + 1] = roughness;
+        ormData[idx + 2] = metallic;
+        ormData[idx + 3] = 255;
+      }
+    }
+
+    const normalData = heightToNormalMap(heightMap, size, size, 3.6);
+    return this.createTextureSet('nano_pro_wood', albedoData, normalData, ormData, size, size);
+  }
+
+  /**
+   * Nano Banana Pro Ultra-Fidelity Mountain Granite & Slate
+   */
+  generateNanoBananaProStonePBR(size: number = 512): PBRTextureSet {
+    const albedoData = new Uint8Array(size * size * 4);
+    const ormData = new Uint8Array(size * size * 4);
+    const heightMap = new Float32Array(size * size);
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = x / size;
+        const v = y / size;
+        const idx = (y * size + x) * 4;
+        const hIdx = y * size + x;
+
+        const v1 = voronoi(u * 7.0, v * 7.0, 619);
+        const fractureBorder = Math.max(0, 1.0 - (v1.dist2 - v1.dist1) * 8.0);
+
+        const macroCrags = fbm(u * 5.0, v * 5.0, 6, 0.52, 2.1, 882);
+        const microPitted = smoothNoise(u * 64.0, v * 64.0, 314) * 0.2;
+        const quartzVein = Math.exp(-Math.pow(Math.sin((u + v * 0.8) * 12.0 + macroCrags * 2.5), 2) / 0.03) * 0.5;
+        const mossPatch = Math.max(0, smoothNoise(u * 4.0, v * 4.0, 999) - 0.65) * 2.5;
+
+        const rockH = macroCrags * 0.65 + v1.dist1 * 0.35 - fractureBorder * 0.7 + quartzVein * 0.35;
+        heightMap[hIdx] = rockH;
+
+        // Rich slate, quartz & alpine moss hues
+        let r = 115 + macroCrags * 50 - fractureBorder * 45 + quartzVein * 85 - mossPatch * 30;
+        let g = 118 + macroCrags * 48 - fractureBorder * 45 + quartzVein * 85 + mossPatch * 25;
+        let b = 125 + macroCrags * 55 - fractureBorder * 45 + quartzVein * 90 - mossPatch * 35;
+
+        albedoData[idx + 0] = Math.min(255, Math.max(0, Math.round(r)));
+        albedoData[idx + 1] = Math.min(255, Math.max(0, Math.round(g)));
+        albedoData[idx + 2] = Math.min(255, Math.max(0, Math.round(b)));
+        albedoData[idx + 3] = 255;
+
+        const ao = Math.round(Math.max(20, (1.0 - fractureBorder * 0.85) * 255));
+        const roughness = Math.round(Math.max(50, Math.min(245, (0.68 - quartzVein * 0.4 + microPitted * 0.15 + mossPatch * 0.18) * 255)));
+        const metallic = Math.round(Math.min(65, quartzVein * 95)); // Crystalline quartz reflection
+
+        ormData[idx + 0] = ao;
+        ormData[idx + 1] = roughness;
+        ormData[idx + 2] = metallic;
+        ormData[idx + 3] = 255;
+      }
+    }
+
+    const normalData = heightToNormalMap(heightMap, size, size, 4.8);
+    return this.createTextureSet('nano_pro_stone', albedoData, normalData, ormData, size, size);
+  }
+
+  /**
+   * Nano Banana Pro Swirling Damascus & Blued Gunmetal PBR
+   */
+  generateNanoBananaProDamascusMetalPBR(size: number = 512): PBRTextureSet {
+    const albedoData = new Uint8Array(size * size * 4);
+    const ormData = new Uint8Array(size * size * 4);
+    const heightMap = new Float32Array(size * size);
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const u = x / size;
+        const v = y / size;
+        const idx = (y * size + x) * 4;
+        const hIdx = y * size + x;
+
+        // Swirling Damascus folded steel pattern
+        const swirl = Math.sin(u * 28.0 + Math.sin(v * 16.0 + u * 8.0) * 4.0 + fbm(u * 8.0, v * 8.0, 4, 0.5, 2.0, 771) * 3.0);
+        const microScratches = smoothNoise(u * 128.0, v * 4.0, 902) * 0.12;
+        const brassFiligree = Math.exp(-Math.pow(Math.sin((u * 4.0 + v * 4.0) * Math.PI * 2.0), 2) / 0.05) * 0.4;
+
+        const h = swirl * 0.3 + microScratches + brassFiligree * 0.2;
+        heightMap[hIdx] = h;
+
+        // Gunmetal blued steel with brass gold filigree highlights
+        let r = 42 + swirl * 20 + brassFiligree * 160;
+        let g = 44 + swirl * 20 + brassFiligree * 125;
+        let b = 54 + swirl * 25 + brassFiligree * 35;
+
+        albedoData[idx + 0] = Math.min(255, Math.max(0, Math.round(r)));
+        albedoData[idx + 1] = Math.min(255, Math.max(0, Math.round(g)));
+        albedoData[idx + 2] = Math.min(255, Math.max(0, Math.round(b)));
+        albedoData[idx + 3] = 255;
+
+        // Ultra high metallic with silky smooth anisotropic roughness
+        ormData[idx + 0] = 240; // High AO
+        ormData[idx + 1] = Math.round(Math.max(40, Math.min(180, (0.24 + (1.0 - swirl) * 0.15 + microScratches * 0.3) * 255)));
+        ormData[idx + 2] = Math.round(245); // Highly Metallic steel/brass
+        ormData[idx + 3] = 255;
+      }
+    }
+
+    const normalData = heightToNormalMap(heightMap, size, size, 2.6);
+    return this.createTextureSet('nano_pro_damascus', albedoData, normalData, ormData, size, size);
+  }
+
+  /**
    * Generates a realistic PBR Timber Wood Texture Set
    * - Albedo: Warm natural lumber color with wood rings, elongated fibers, plank seams, and subtle grain variations
    * - Normal: Micro-groove ridges along timber grain, knot rings, and bevelled plank joins
@@ -471,34 +632,34 @@ export class PBRTextureGenerator {
         const idx = (y * size + x) * 4;
         const hIdx = y * size + x;
 
-        // Radiating needle clusters
-        const angle = Math.atan2(v - 0.5, u - 0.5);
-        const radius = Math.hypot(u - 0.5, v - 0.5);
-        const needleBristle = Math.sin(angle * 36.0 + smoothNoise(u * 12, v * 12, 401) * 6.0);
-        const foliageNoise = fbm(u * 18.0, v * 18.0, 3, 0.6, 2.0, 808);
+        // Multi-scale organic pine needle & twig pattern (seamless planar/cylindrical tiling)
+        const needleNoise1 = fbm(u * 24.0, v * 24.0, 4, 0.6, 2.0, 401);
+        const needleNoise2 = fbm(u * 48.0 + 3.14, v * 48.0 + 1.61, 3, 0.5, 2.0, 808);
+        const branchStructure = smoothNoise(u * 6.0, v * 6.0, 912);
 
-        const needleH = Math.max(0, needleBristle * 0.5 + foliageNoise * 0.5);
+        const needleH = Math.max(0, Math.min(1, needleNoise1 * 0.65 + needleNoise2 * 0.35));
         heightMap[hIdx] = needleH;
 
-        // Rich alpine evergreen needle hues (deep emerald pine green)
-        const baseG = 42 + needleH * 50 + foliageNoise * 20;
-        const baseR = 14 + needleH * 18;
-        const baseB = 16 + needleH * 16;
+        // Rich authentic alpine pine hues (deep evergreen with subtle sunlit tips)
+        const shadowFactor = 0.55 + branchStructure * 0.45;
+        const baseG = (28 + needleH * 55 + branchStructure * 20) * shadowFactor;
+        const baseR = (16 + needleH * 22 + branchStructure * 12) * shadowFactor;
+        const baseB = (14 + needleH * 20 + branchStructure * 10) * shadowFactor;
 
         albedoData[idx + 0] = Math.min(255, Math.max(0, Math.round(baseR)));
         albedoData[idx + 1] = Math.min(255, Math.max(0, Math.round(baseG)));
         albedoData[idx + 2] = Math.min(255, Math.max(0, Math.round(baseB)));
         albedoData[idx + 3] = 255;
 
-        // ORM: Red = AO (dense needle shadows), Green = Roughness (waxy needles ~0.65), Blue = Metallic (0)
-        ormData[idx + 0] = Math.round((0.65 + needleH * 0.35) * 255);
-        ormData[idx + 1] = Math.round(0.68 * 255);
+        // ORM: Red = AO, Green = Roughness (waxy needles ~0.7), Blue = Metallic (0)
+        ormData[idx + 0] = Math.round((0.6 + needleH * 0.4) * 255);
+        ormData[idx + 1] = Math.round(0.72 * 255);
         ormData[idx + 2] = 0;
         ormData[idx + 3] = 255;
       }
     }
 
-    const normalData = heightToNormalMap(heightMap, size, size, 3.5);
+    const normalData = heightToNormalMap(heightMap, size, size, 2.4);
     return this.createTextureSet('needle_pine', albedoData, normalData, ormData, size, size);
   }
 

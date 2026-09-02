@@ -1,0 +1,49 @@
+{
+  "entities": {
+    "RegisteredPlayer": {
+      "title": "RegisteredPlayer",
+      "description": "A privacy-preserving unique anonymous player record without PII or tracking",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Anonymous Authentication UID matching the player",
+          "maxLength": 128
+        },
+        "registeredAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the player was registered"
+        }
+      },
+      "required": ["uid", "registeredAt"]
+    },
+    "PlayerCounter": {
+      "title": "PlayerCounter",
+      "description": "Global aggregate counter for verified unique anonymous players",
+      "type": "object",
+      "properties": {
+        "totalUniquePlayers": {
+          "type": "number",
+          "description": "Total unique anonymous players registered"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last counter increment"
+        }
+      },
+      "required": ["totalUniquePlayers", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/registered_players/{uid}": {
+      "schema": "RegisteredPlayer",
+      "description": "Stores single registration entry per unique anonymous player"
+    },
+    "/stats/{statId}": {
+      "schema": "PlayerCounter",
+      "description": "Stores global player statistics including total unique players"
+    }
+  }
+}

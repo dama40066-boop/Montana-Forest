@@ -333,7 +333,9 @@ export const Minimap3D: React.FC<MinimapProps> = ({
   return (
     <div
       className={`relative pointer-events-auto bg-stone-950/85 backdrop-blur-md rounded-xl border border-white/15 overflow-hidden shadow-2xl transition-all duration-300 ${
-        isExpanded ? 'w-80 h-80' : 'w-48 h-48'
+        isExpanded
+          ? 'w-[75vw] max-w-[320px] h-[75vw] max-h-[320px] sm:w-72 sm:h-72 md:w-80 md:h-80'
+          : 'w-28 h-28 sm:w-36 sm:h-36 md:w-44 md:h-44'
       }`}
     >
       <canvas
@@ -352,21 +354,21 @@ export const Minimap3D: React.FC<MinimapProps> = ({
       />
 
       {/* Header Overlay */}
-      <div className="absolute top-1.5 left-2 right-2 flex items-center justify-between pointer-events-none text-[10px] font-mono text-stone-200 drop-shadow">
-        <span className="flex items-center gap-1 font-bold text-amber-400">
-          <Compass className="w-3.5 h-3.5 text-amber-400" />
+      <div className="absolute top-1 left-1.5 right-1.5 flex items-center justify-between pointer-events-none text-[9px] sm:text-[10px] font-mono text-stone-200 drop-shadow">
+        <span className="flex items-center gap-0.5 sm:gap-1 font-bold text-amber-400">
+          <Compass className="w-3 h-3 text-amber-400" />
           {Math.round((((playerYaw * 180) / Math.PI + 360) % 360))}°
         </span>
-        <span className="bg-black/50 px-1.5 py-0.5 rounded text-[9px]">
-          {isFollowPlayer ? 'TRACKING' : 'FREE PAN'}
+        <span className="bg-black/50 px-1 py-0.2 rounded text-[8px] sm:text-[9px] hidden xs:inline-block">
+          {isFollowPlayer ? 'TRACKING' : 'PAN'}
         </span>
-        <span>
+        <span className="text-[8px] sm:text-[9px]">
           X:{Math.round(playerPos[0])} Z:{Math.round(playerPos[2])}
         </span>
       </div>
 
       {/* Toolbar Controls */}
-      <div className="absolute bottom-1.5 right-1.5 flex items-center gap-1 bg-black/60 backdrop-blur-sm p-0.5 rounded-lg border border-white/10">
+      <div className="absolute bottom-1 right-1 flex items-center gap-0.5 sm:gap-1 bg-black/70 backdrop-blur-sm p-0.5 rounded-lg border border-white/10">
         <button
           onClick={() => setTiltMode(!tiltMode)}
           className={`p-1 rounded text-stone-300 transition ${
@@ -374,35 +376,35 @@ export const Minimap3D: React.FC<MinimapProps> = ({
           }`}
           title="Toggle 2.5D Isometric Tilt"
         >
-          <Layers className="w-3 h-3" />
+          <Layers className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
         </button>
         <button
           onClick={() => setZoom((z) => clampZoom(z - 0.25))}
-          className="p-1 hover:bg-stone-800 rounded text-stone-300 transition"
+          className="p-1 hover:bg-stone-800 rounded text-stone-300 transition hidden sm:block"
           title="Zoom Out"
         >
-          <ZoomOut className="w-3 h-3" />
+          <ZoomOut className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
         </button>
         <button
           onClick={() => setZoom((z) => clampZoom(z + 0.25))}
-          className="p-1 hover:bg-stone-800 rounded text-stone-300 transition"
+          className="p-1 hover:bg-stone-800 rounded text-stone-300 transition hidden sm:block"
           title="Zoom In"
         >
-          <ZoomIn className="w-3 h-3" />
+          <ZoomIn className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
         </button>
         <button
           onClick={handleRecenter}
           className="p-1 hover:bg-stone-800 rounded text-stone-300 transition"
           title="Re-center on Player"
         >
-          <RotateCcw className="w-3 h-3" />
+          <RotateCcw className="w-2.5 h-2.5 sm:w-3 sm:h-3" />
         </button>
         <button
           onClick={() => setIsExpanded((e) => !e)}
           className="p-1 hover:bg-stone-800 rounded text-stone-300 transition"
           title={isExpanded ? 'Minimize Radar' : 'Expand Radar'}
         >
-          {isExpanded ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+          {isExpanded ? <Minimize2 className="w-2.5 h-2.5 sm:w-3 sm:h-3" /> : <Maximize2 className="w-2.5 h-2.5 sm:w-3 sm:h-3" />}
         </button>
       </div>
     </div>

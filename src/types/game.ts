@@ -27,6 +27,12 @@ export interface PlayerStats {
   maxHp: number;
   stamina: number;
   maxStamina: number;
+  hunger: number; // 0 to 100
+  maxHunger: number; // 100
+  thirst: number; // 0 to 100
+  maxThirst: number; // 100
+  isStarving: boolean;
+  isDehydrated: boolean;
   gold: number;
   reputation: {
     townsfolk: number;
@@ -66,6 +72,8 @@ export interface InventoryItem {
     heal?: number;
     stamina?: number;
     durability?: number;
+    hunger?: number;
+    thirst?: number;
   };
 }
 

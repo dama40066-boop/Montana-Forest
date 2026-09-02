@@ -160,7 +160,7 @@ export const SettingsModal: React.FC<Props> = ({ settings: propSettings, current
               {/* Quality Preset */}
               <div>
                 <label className="block text-xs font-mono uppercase tracking-wider text-stone-400 mb-2">
-                  Quality Tier Preset
+                  Quality Tier Preset &amp; PBR Shaders
                 </label>
                 <div className="grid grid-cols-4 gap-2">
                   {(['LOW', 'MEDIUM', 'HIGH', 'ULTRA'] as QualityLevel[]).map((tier) => (
@@ -176,6 +176,9 @@ export const SettingsModal: React.FC<Props> = ({ settings: propSettings, current
                       {tier}
                     </button>
                   ))}
+                </div>
+                <div className="mt-2 text-[11px] text-stone-400 flex items-center gap-1.5 bg-stone-950/70 border border-stone-800 p-2.5 rounded-lg">
+                  <span className="text-amber-400 font-semibold">Nano Banana Pro:</span> Multi-octave procedural PBR maps (Wood grain, Damascus metal, Stone relief, Anisotropic filtering 16x) with biomechanical character rigs.
                 </div>
               </div>
 

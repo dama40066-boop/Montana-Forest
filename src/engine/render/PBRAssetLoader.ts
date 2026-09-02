@@ -36,7 +36,7 @@ export class PBRAssetLoader {
   private scene: BABYLON.Scene;
   private texGenerator: PBRTextureGenerator;
   private textureCache: Map<string, PBRTextureSet> = new Map();
-  private materialCache: Map<string, BABYLON.PBRMaterial> = new Map();
+  private materialCache: Map<string, BABYLON.StandardMaterial | BABYLON.PBRMaterial> = new Map();
   private quality: QualityLevel = 'HIGH';
 
   // Standard environment asset definitions
@@ -250,16 +250,21 @@ export class PBRAssetLoader {
     // Procedural generation fallback using deterministic PBR map generator
     let texSet: PBRTextureSet;
     const key = cfg.generatorKey || assetKey;
+    const isUltraPro = this.quality === 'ULTRA' || this.quality === 'HIGH';
 
     switch (key) {
       case 'wood':
       case 'building_wood':
       case 'dock_wood':
-        texSet = this.texGenerator.generateWoodPlankPBR(res, 4);
+        texSet = isUltraPro
+          ? this.texGenerator.generateNanoBananaProWoodPBR(res, 6)
+          : this.texGenerator.generateWoodPlankPBR(res, 4);
         break;
       case 'stone':
       case 'stone_rock':
-        texSet = this.texGenerator.generateStoneRockPBR(res);
+        texSet = isUltraPro
+          ? this.texGenerator.generateNanoBananaProStonePBR(res)
+          : this.texGenerator.generateStoneRockPBR(res);
         break;
       case 'mud':
       case 'mud_soil':
@@ -291,14 +296,18 @@ export class PBRAssetLoader {
         break;
       case 'iron':
       case 'iron_metal':
-        texSet = this.texGenerator.generateIronMetalPBR(res);
+        texSet = isUltraPro
+          ? this.texGenerator.generateNanoBananaProDamascusMetalPBR(res)
+          : this.texGenerator.generateIronMetalPBR(res);
         break;
       case 'glass':
       case 'window_glass':
         texSet = this.texGenerator.generateWindowGlassPBR(res);
         break;
       default:
-        texSet = this.texGenerator.generateStoneRockPBR(res);
+        texSet = isUltraPro
+          ? this.texGenerator.generateNanoBananaProStonePBR(res)
+          : this.texGenerator.generateStoneRockPBR(res);
         break;
     }
 
@@ -307,20 +316,21 @@ export class PBRAssetLoader {
   }
 
   /**
-   * Creates a configured BABYLON.PBRMaterial instance hooked up to the PBR texture set
+   * Creates a configured material instance hooked up to the texture set
    */
-  public createPBRMaterial(name: string, config: PBRMapSourceConfig, texSet: PBRTextureSet): BABYLON.PBRMaterial {
-    const mat = new BABYLON.PBRMaterial(name, this.scene);
+  public createPBRMaterial(name: string, config: PBRMapSourceConfig, texSet: PBRTextureSet): BABYLON.StandardMaterial {
+    const mat = new BABYLON.StandardMaterial(name, this.scene);
 
-    // 1. Albedo / BaseColor Map
-    const albedo = texSet.albedo.clone();
-    albedo.uScale = config.uScale ?? 1;
-    albedo.vScale = config.vScale ?? 1;
-    albedo.anisotropicFilteringLevel = this.quality === 'ULTRA' ? 16 : this.quality === 'HIGH' ? 8 : 4;
-    mat.albedoTexture = albedo;
+    // 1. Albedo / Diffuse Map
+    texSet.albedo.uScale = config.uScale ?? 1;
+    texSet.albedo.vScale = config.vScale ?? 1;
+    texSet.albedo.anisotropicFilteringLevel = this.quality === 'ULTRA' ? 16 : this.quality === 'HIGH' ? 8 : 4;
+    mat.diffuseTexture = texSet.albedo;
 
     if (config.albedoColor) {
-      mat.albedoColor = new BABYLON.Color3(...config.albedoColor);
+      mat.diffuseColor = new BABYLON.Color3(...config.albedoColor);
+    } else {
+      mat.diffuseColor = new BABYLON.Color3(1, 1, 1);
     }
 
     if (config.emissiveColor) {
@@ -328,38 +338,16 @@ export class PBRAssetLoader {
     }
 
     // 2. Normal / Bump Map (Tangent-Space)
-    const normal = texSet.normal.clone();
-    normal.uScale = config.uScale ?? 1;
-    normal.vScale = config.vScale ?? 1;
-    normal.anisotropicFilteringLevel = this.quality === 'ULTRA' ? 16 : this.quality === 'HIGH' ? 8 : 4;
-    mat.bumpTexture = normal;
+    texSet.normal.uScale = config.uScale ?? 1;
+    texSet.normal.vScale = config.vScale ?? 1;
+    texSet.normal.anisotropicFilteringLevel = this.quality === 'ULTRA' ? 16 : this.quality === 'HIGH' ? 8 : 4;
+    mat.bumpTexture = texSet.normal;
     mat.bumpTexture.level = config.bumpLevel ?? 1.0;
 
-    // 3. ORM Packed Texture (Occlusion: Red, Roughness: Green, Metallic: Blue)
-    const orm = texSet.orm.clone();
-    orm.uScale = config.uScale ?? 1;
-    orm.vScale = config.vScale ?? 1;
-    orm.anisotropicFilteringLevel = this.quality === 'ULTRA' ? 16 : this.quality === 'HIGH' ? 8 : 4;
-    mat.metallicTexture = orm;
-
-    // Wire up ORM channel decoding
-    mat.useRoughnessFromMetallicTextureGreen = true;
-    mat.useMetallnessFromMetallicTextureBlue = true;
-    mat.useAmbientOcclusionFromMetallicTextureRed = true;
-    mat.ambientTexture = orm;
-
-    // 4. Physical Lighting Responses
-    mat.directIntensity = config.directIntensity ?? 1.25;
-    mat.environmentIntensity = config.environmentIntensity ?? 0.85;
-    mat.specularIntensity = config.specularIntensity ?? 1.0;
-
-    // 5. Optional Subsurface / Refraction
-    if (config.subsurface) {
-      if (config.subsurface.isRefractionEnabled) {
-        mat.subSurface.isRefractionEnabled = true;
-        mat.subSurface.indexOfRefraction = config.subsurface.indexOfRefraction ?? 1.333;
-      }
-    }
+    // 3. Specular responses
+    const specIntensity = config.specularIntensity ?? 0.8;
+    mat.specularColor = new BABYLON.Color3(0.2 * specIntensity, 0.2 * specIntensity, 0.2 * specIntensity);
+    mat.specularPower = 32;
 
     this.materialCache.set(name, mat);
     return mat;
@@ -368,8 +356,8 @@ export class PBRAssetLoader {
   /**
    * Preload and construct all environment materials in one batch
    */
-  public async loadAllEnvironmentMaterials(): Promise<Record<string, BABYLON.PBRMaterial>> {
-    const materials: Record<string, BABYLON.PBRMaterial> = {};
+  public async loadAllEnvironmentMaterials(): Promise<Record<string, BABYLON.StandardMaterial>> {
+    const materials: Record<string, BABYLON.StandardMaterial> = {};
 
     const keys = Object.keys(this.manifest);
     for (const key of keys) {
@@ -384,7 +372,7 @@ export class PBRAssetLoader {
   /**
    * Helper to retrieve or look up a cached material
    */
-  public getMaterial(name: string): BABYLON.PBRMaterial | undefined {
+  public getMaterial(name: string): BABYLON.StandardMaterial | BABYLON.PBRMaterial | undefined {
     return this.materialCache.get(name);
   }
 
